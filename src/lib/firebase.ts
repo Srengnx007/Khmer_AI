@@ -13,9 +13,27 @@ const firebaseConfig = {
 };
 
 // Initialize Firebase
-const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
-const auth = getAuth(app);
-const db = getFirestore(app);
-const storage = getStorage(app);
+import { FirebaseApp } from "firebase/app";
+import { Auth } from "firebase/auth";
+import { Firestore } from "firebase/firestore";
+import { FirebaseStorage } from "firebase/storage";
+
+// Initialize Firebase
+let app: FirebaseApp | undefined;
+let auth: Auth | undefined;
+let db: Firestore | undefined;
+let storage: FirebaseStorage | undefined;
+
+try {
+    console.log("Initializing Firebase Client SDK...");
+    console.log("API Key present:", !!firebaseConfig.apiKey);
+
+    app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+    auth = getAuth(app);
+    db = getFirestore(app);
+    storage = getStorage(app);
+} catch (error) {
+    console.error("Firebase Client SDK Initialization Failed:", error);
+}
 
 export { app, auth, db, storage };

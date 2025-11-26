@@ -31,5 +31,12 @@ export function initAdmin() {
     return getApp();
 }
 
-export const adminAuth = getAuth(initAdmin());
-export const adminDb = getFirestore(initAdmin());
+
+
+export function getAdminAuth() {
+    return getAuth(initAdmin());
+}
+
+export function getAdminDb() {
+    return getFirestore(initAdmin());
+}

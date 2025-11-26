@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateAIResponse } from "@/lib/gemini";
-import { adminAuth, adminDb } from "@/lib/firebase-admin";
+import { getAdminAuth, getAdminDb } from "@/lib/firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 import { z } from "zod";
 
 const inputSchema = z.object({
@@ -16,14 +17,14 @@ export async function POST(req: NextRequest) {
             return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
         }
         const token = authHeader.split("Bearer ")[1];
-        const decodedToken = await adminAuth.verifyIdToken(token);
+        const decodedToken = await getAdminAuth().verifyIdToken(token);
         const uid = decodedToken.uid;
 
         // 2. Rate Limiting (Simple implementation using Firestore)
         // Limit: 20 requests per hour
         const now = new Date();
         const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-        const usageRef = adminDb.collection("ai_usage");
+        const usageRef = getAdminDb().collection("ai_usage");
         const usageQuery = await usageRef
             .where("uid", "==", uid)
             .where("timestamp", ">", oneHourAgo)
@@ -60,7 +61,7 @@ export async function POST(req: NextRequest) {
         await usageRef.add({
             uid,
             tool: "translator",
-            timestamp: adminDb.FieldValue.serverTimestamp(),
+            timestamp: FieldValue.serverTimestamp(),
             inputLength: text.length,
         });
 
