@@ -19,21 +19,24 @@ import { Firestore } from "firebase/firestore";
 import { FirebaseStorage } from "firebase/storage";
 
 // Initialize Firebase
-let app: FirebaseApp | undefined;
-let auth: Auth | undefined;
-let db: Firestore | undefined;
-let storage: FirebaseStorage | undefined;
+let _app: FirebaseApp | undefined;
+let _auth: Auth | undefined;
+let _db: Firestore | undefined;
+let _storage: FirebaseStorage | undefined;
 
 try {
     console.log("Initializing Firebase Client SDK...");
     console.log("API Key present:", !!firebaseConfig.apiKey);
 
-    app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
-    auth = getAuth(app);
-    db = getFirestore(app);
-    storage = getStorage(app);
+    _app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
+    _auth = getAuth(_app);
+    _db = getFirestore(_app);
+    _storage = getStorage(_app);
 } catch (error) {
     console.error("Firebase Client SDK Initialization Failed:", error);
 }
 
-export { app, auth, db, storage };
+export const app = _app as FirebaseApp;
+export const auth = _auth as Auth;
+export const db = _db as Firestore;
+export const storage = _storage as FirebaseStorage;

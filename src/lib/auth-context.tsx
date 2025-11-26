@@ -7,7 +7,10 @@ import {
     GoogleAuthProvider,
     GithubAuthProvider,
     signInWithPopup,
-    signOut
+    signOut,
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    updateProfile
 } from "firebase/auth";
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { auth, db } from "./firebase";
@@ -21,6 +24,8 @@ interface AuthContextType {
     loading: boolean;
     signInWithGoogle: () => Promise<void>;
     signInWithGithub: () => Promise<void>;
+    signInWithEmail: (email: string, password: string) => Promise<void>;
+    signUpWithEmail: (email: string, password: string, name: string) => Promise<void>;
     logout: () => Promise<void>;
 }
 
@@ -30,6 +35,8 @@ const AuthContext = createContext<AuthContextType>({
     loading: true,
     signInWithGoogle: async () => { },
     signInWithGithub: async () => { },
+    signInWithEmail: async () => { },
+    signUpWithEmail: async () => { },
     logout: async () => { },
 });
 
@@ -81,6 +88,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             router.push("/dashboard");
         } catch (error) {
             console.error("Error signing in with Google", error);
+            throw error;
         }
     };
 
@@ -91,6 +99,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             router.push("/dashboard");
         } catch (error) {
             console.error("Error signing in with Github", error);
+            throw error;
+        }
+    };
+
+    const signInWithEmail = async (email: string, password: string) => {
+        try {
+            await signInWithEmailAndPassword(auth, email, password);
+            router.push("/dashboard");
+        } catch (error) {
+            console.error("Error signing in with Email", error);
+            throw error;
+        }
+    };
+
+    const signUpWithEmail = async (email: string, password: string, name: string) => {
+        try {
+            const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+            const user = userCredential.user;
+            await updateProfile(user, { displayName: name });
+
+            // Create user doc manually since onAuthStateChanged might trigger before name is updated
+            // But onAuthStateChanged handles it well usually. 
+            // We rely on onAuthStateChanged to create the doc, but we can force update the name there.
+
+            router.push("/dashboard");
+        } catch (error) {
+            console.error("Error signing up with Email", error);
+            throw error;
         }
     };
 
@@ -104,7 +140,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     return (
-        <AuthContext.Provider value={{ user, role, loading, signInWithGoogle, signInWithGithub, logout }}>
+        <AuthContext.Provider value={{ user, role, loading, signInWithGoogle, signInWithGithub, signInWithEmail, signUpWithEmail, logout }}>
             {children}
         </AuthContext.Provider>
     );
