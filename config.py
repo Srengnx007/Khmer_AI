@@ -12,6 +12,8 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 TG_LINK_FOR_FB = "https://t.me/AIDailyNewsKH"
+TELEGRAM_PERSONAL_ID = 8134594049
+TELEGRAM_LOG_CHANNEL_ID = os.getenv("TELEGRAM_LOG_CHANNEL_ID")
 
 # 2. Facebook Settings
 FB_PAGE_ID = os.getenv("FB_PAGE_ID")
