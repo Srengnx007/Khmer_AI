@@ -51,7 +51,7 @@ trigger_event = asyncio.Event()
 
 # =========================== FETCHING & PROCESSING ===========================
 async def fetch_rss(url: str):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {"User-Agent": "KhmerNewsBot/2.0 (+https://t.me/AIDailyNewsKH)"}
     async with aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=25)) as s:
         try:
             async with s.get(url) as r:
@@ -80,7 +80,7 @@ async def get_article_id(t: str, l: str):
         return str(hash(f"{t}{l}"))
 
 async def translate(article):
-    prompt = f"Translate to natural Khmer:\nTitle: {article['title']}\nContent: {article['summary'][:2500]}\nReturn JSON: {{\"title_kh\": \"...\", \"body_kh\": \"...\"}}"
+    prompt = f"Translate to natural, engaging Khmer for Telegram news:\nTitle: {article['title']}\nContent: {article['summary'][:2500]}\nReturn JSON: {{\"title_kh\": \"...\", \"body_kh\": \"...\"}}"
     try:
         model = genai.GenerativeModel(config.GEMINI_MODEL)
         resp = await asyncio.to_thread(model.generate_content, prompt)
@@ -95,7 +95,7 @@ async def translate(article):
         data = json.loads(text)
         article["title_kh"] = data.get("title_kh", article["title"])
         article["body_kh"] = data.get("body_kh", article["summary"][:500])
-        await asyncio.sleep(5)
+        await asyncio.sleep(7)
     except Exception as e:
         logger.warning(f"Translation Error: {e}")
         article["title_kh"] = article["title"]
@@ -146,8 +146,15 @@ async def post_to_telegram(article: dict, emoji: str):
     if not (config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHANNEL_ID): return False
     bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
     
+    # Add Flag Emoji based on source
+    title_prefix = ""
+    if any(s["name"] == article["source"] for s in config.NEWS_SOURCES.get("thai", [])):
+        title_prefix = "🇹🇭 "
+    elif any(s["name"] == article["source"] for s in config.NEWS_SOURCES.get("vietnamese", [])):
+        title_prefix = "🇻🇳 "
+
     caption = (
-        f"{emoji} <b>{article['title_kh']}</b>\n\n"
+        f"{emoji} {title_prefix}<b>{article['title_kh']}</b>\n\n"
         f"{article['body_kh']}\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
         f"ប្រភព: {article['source']}\n"
