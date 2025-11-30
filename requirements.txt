@@ -1,0 +1,8 @@
+python-dotenv
+aiohttp
+feedparser
+beautifulsoup4
+google-generativeai
+python-telegram-bot
+aiosqlite
+pytz
