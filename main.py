@@ -1,8 +1,20 @@
+# CHANGES:
+# - FIX #1: Removed duplicate BOT_STATE keys (tg_posts, errors)
+# - FIX #3: Made rate limiter async with actual waiting
+# - FIX #4: Global Twitter client initialization
+# - FIX #6: Moved config validation to main block
+# - FIX #10: Using time.time() for consistent timestamps
+# - FIX #2: Added cleanup_scheduler async task
+# - FIX #5: Image failure tracking in post_to_telegram
+# - FIX #8: Facebook error logging with response data
+# - Enhancement #13: Image size limit reduced to 5MB
+# - Enhancement #15: Translation fallback to English
+
 import asyncio
 import json
 import hashlib
 import re
-import logging
+import time
 import traceback
 import time
 from datetime import datetime, timedelta
@@ -39,6 +51,7 @@ class JsonFormatter(logging.Formatter):
             log_obj["exception"] = traceback.format_exception(*record.exc_info)
         return json.dumps(log_obj, ensure_ascii=False)
 
+# FIX #1: Removed duplicate keys
 BOT_STATE = {
     "status": "Starting...",
     "last_run": "Never",
@@ -46,42 +59,47 @@ BOT_STATE = {
     "total_posted": 0,
     "fb_posts": 0,
     "tg_posts": 0,
+    "x_posts": 0,
     "errors": 0,
     "translations": 0,
     "cache_hits": 0,
-    "tg_posts": 0,
-    "x_posts": 0,
-    "errors": 0,
     "duplicate_skips": 0,
     "image_failures": 0,
     "sources_health": defaultdict(lambda: {'success': 0, 'fail': 0}),
     "logs": deque(maxlen=50)
 }
 
-# Rate Limit Trackers
+# FIX #10: Rate Limit Trackers using time.time() for consistency
 API_USAGE = defaultdict(list)
 
-def check_platform_rate_limit(platform: str) -> bool:
-    """Check if we can make a call to the platform"""
+# FIX #3: Async rate limiter with waiting
+async def check_platform_rate_limit(platform: str) -> bool:
+    """Check if we can make a call to the platform, with waiting if needed"""
     limit = config.RATE_LIMITS.get(platform)
     if not limit: return True
     
-    now = datetime.now().timestamp()
+    now = time.time()
     # Clean old calls
     API_USAGE[platform] = [t for t in API_USAGE[platform] if now - t < limit["period"]]
     
     if len(API_USAGE[platform]) >= limit["calls"]:
-        logger.warning(f"⚠️ Rate limit hit for {platform}")
-        return False
+        # Calculate wait time until oldest call expires
+        oldest_call = API_USAGE[platform][0]
+        wait_time = limit["period"] - (now - oldest_call) + 1
+        logger.warning(f"⚠️ Rate limit hit for {platform}, waiting {wait_time:.1f}s")
+        await asyncio.sleep(wait_time)
+        # Clean again after waiting
+        now = time.time()
+        API_USAGE[platform] = [t for t in API_USAGE[platform] if now - t < limit["period"]]
         
-    API_USAGE[platform].append(now)
+    API_USAGE[platform].append(time.time())
     return True
 
 def is_similar_to_recent(title: str, recent_titles: list) -> bool:
     """Check if title is similar to any recent titles"""
     for recent in recent_titles:
         ratio = difflib.SequenceMatcher(None, title, recent).ratio()
-        if ratio > 0.85:
+        if ratio > config.SIMILARITY_THRESHOLD:  # Using constant from config
             return True
     return False
 
@@ -104,6 +122,20 @@ telegram_bot = None
 if config.TELEGRAM_BOT_TOKEN:
     telegram_bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
     logger.info("✅ Telegram bot initialized")
+
+# FIX #4: Global Twitter Client (initialize once)
+twitter_client = None
+if config.X_API_KEY and config.X_API_SECRET and config.X_ACCESS_TOKEN and config.X_ACCESS_TOKEN_SECRET:
+    try:
+        twitter_client = tweepy.Client(
+            consumer_key=config.X_API_KEY,
+            consumer_secret=config.X_API_SECRET,
+            access_token=config.X_ACCESS_TOKEN,
+            access_token_secret=config.X_ACCESS_TOKEN_SECRET
+        )
+        logger.info("✅ Twitter client initialized")
+    except Exception as e:
+        logger.error(f"❌ Twitter client failed: {e}")
 
 # Gemini AI
 if config.GEMINI_API_KEY:
@@ -224,9 +256,10 @@ async def validate_image(image_url: str) -> bool:
                 if not content_type.startswith('image/'):
                     return False
                 
-                # Check size (max 20MB for Telegram)
+                # Enhancement #13: Check size (max 5MB for Telegram)
                 content_length = int(response.headers.get('Content-Length', 0))
-                if content_length > 20 * 1024 * 1024:
+                if content_length > config.IMAGE_MAX_SIZE_MB * 1024 * 1024:
+                    logger.warning(f"⚠️ Image too large: {content_length / (1024*1024):.1f}MB")
                     return False
                 
                 return response.status == 200
@@ -243,8 +276,11 @@ async def get_article_id(title: str, link: str):
 
 # =========================== TRANSLATION ===========================
 
+# Translation failure tracking
+TRANSLATION_FAILURES = defaultdict(int)
+
 @backoff.on_exception(backoff.expo, Exception, max_tries=3)
-async def translate(article):
+async def translate(article: dict):
     """Translate article to Khmer with caching"""
     aid = await get_article_id(article['title'], article['link'])
     
@@ -300,19 +336,28 @@ Return ONLY valid JSON with no markdown:
         logger.info(f"✅ Translated: {article['title'][:30]}")
         
         # Rate limiting delay
-        await asyncio.sleep(7)
+        await asyncio.sleep(config.TRANSLATION_DELAY)  # Using constant
         
     except json.JSONDecodeError as e:
         logger.warning(f"⚠️ JSON parse error: {e}")
         article["title_kh"] = article["title"]
         article["body_kh"] = article["summary"][:500]
         BOT_STATE["errors"] += 1
+        TRANSLATION_FAILURES[aid] += 1
         
     except Exception as e:
         logger.error(f"❌ Translation error: {e}")
-        article["title_kh"] = article["title"]
-        article["body_kh"] = article["summary"][:500]
+        TRANSLATION_FAILURES[aid] += 1
         BOT_STATE["errors"] += 1
+        
+        # Enhancement #15: Translation fallback after 3 failures
+        if TRANSLATION_FAILURES[aid] >= 3:
+            logger.warning("⚠️ Translation failed 3 times, using English with disclaimer")
+            article["title_kh"] = "⚠️ ស្រាប់ភាសាអង់គ្លេស (Translation unavailable) - " + article["title"]
+            article["body_kh"] = article["summary"][:500]
+        else:
+            article["title_kh"] = article["title"]
+            article["body_kh"] = article["summary"][:500]
         
         await send_error_report(
             "Translation Failed",
@@ -330,30 +375,24 @@ Return ONLY valid JSON with no markdown:
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=3)
 async def post_to_x(article: dict, emoji: str):
-    if not (config.X_API_KEY and config.X_API_SECRET and config.X_ACCESS_TOKEN and config.X_ACCESS_TOKEN_SECRET):
+    # FIX #4: Use global twitter_client instead of creating new one
+    if not twitter_client:
         return False
 
-    if not check_platform_rate_limit("x"): return False
+    if not await check_platform_rate_limit("x"): return False
 
     try:
-        client = tweepy.Client(
-            consumer_key=config.X_API_KEY,
-            consumer_secret=config.X_API_SECRET,
-            access_token=config.X_ACCESS_TOKEN,
-            access_token_secret=config.X_ACCESS_TOKEN_SECRET
-        )
-        
         # Smart Truncate
         title = article['title_kh']
         link = article['link']
-        max_len = 280 - len(link) - 5 # 5 for emoji/spaces
+        max_len = config.MAX_TWEET_LENGTH - len(link) - 5  # Using constant
         
         if len(title) > max_len:
             title = title[:max_len-3] + "..."
             
         text = f"{emoji} {title}\n{link}"
         
-        await asyncio.to_thread(client.create_tweet, text=text)
+        await asyncio.to_thread(twitter_client.create_tweet, text=text)
         BOT_STATE["x_posts"] += 1
         logger.info(f"✅ X Posted: {title[:30]}...")
         return True
@@ -391,13 +430,19 @@ async def post_to_facebook(article: dict, emoji: str):
                 "published": "true"
             }
             
-            async with session.post(url, data=params) as response:
-                resp_data = await response.json()
-                
-                if resp_data.get("id"):
+            async with session.post(url, params=params) as resp:
+                resp_data = await resp.json()
+                # FIX #8: Log detailed error information
+                if resp.status == 200 and "id" in resp_data:
+                    logger.info(f"✅ FB Photo Posted: {resp_data['id']}")
                     BOT_STATE["fb_posts"] += 1
-                    logger.info(f"✅ FB Photo Posted: {resp_data.get('id')}")
                     return True
+                else:
+                    # Log response data for debugging
+                    if "error" in resp_data:
+                        logger.error(f"❌ FB Error: {resp_data['error'].get('message', 'Unknown')}")
+                    else:
+                        logger.error(f"❌ FB Failed: Status {resp.status}, Data: {resp_data}")
         
         # Fallback to link post
         url = f"https://graph.facebook.com/{api_ver}/{config.FB_PAGE_ID}/feed"
@@ -408,13 +453,19 @@ async def post_to_facebook(article: dict, emoji: str):
             "published": "true"
         }
         
-        async with session.post(url, data=params) as response:
-            resp_data = await response.json()
-            
-            if resp_data.get("id"):
+        async with session.post(url, params=params) as resp:
+            resp_data = await resp.json()
+            # FIX #8: Log detailed error information
+            if resp.status == 200 and "id" in resp_data:
                 BOT_STATE["fb_posts"] += 1
-                logger.info(f"✅ FB Link Posted: {resp_data.get('id')}")
+                logger.info(f"✅ FB Link Posted: {resp_data['id']}")
                 return True
+            else:
+                # Log response data for debugging
+                if "error" in resp_data:
+                    logger.error(f"❌ FB Error: {resp_data['error'].get('message', 'Unknown')}")
+                else:
+                    logger.error(f"❌ FB Failed: Status {resp.status}, Data: {resp_data}")
     
     return False
 
@@ -456,20 +507,23 @@ async def post_to_telegram(article: dict, emoji: str, is_breaking: bool = False)
         # Validate image first
         if await validate_image(article["image_url"]):
             try:
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(article["image_url"], timeout=10) as response:
-                        if response.status == 200:
-                            photo_data = await response.read()
-                            msg = await telegram_bot.send_photo(
-                                chat_id=config.TELEGRAM_CHANNEL_ID,
-                                photo=photo_data,
-                                caption=caption[:1024],
-                                parse_mode=ParseMode.HTML,
-                                reply_markup=buttons
-                            )
+                msg = await telegram_bot.send_photo(
+                    chat_id=config.TELEGRAM_CHANNEL_ID,
+                    photo=article["image_url"],
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=buttons
+                )
+                BOT_STATE["tg_posts"] += 1
+                logger.info(f"✅ TG Photo Posted: {msg.message_id}")
             except Exception as e:
-                logger.warning(f"⚠️ Photo send failed: {e}")
+                # FIX #5: Track image failures
+                BOT_STATE["image_failures"] += 1
+                logger.warning(f"⚠️ TG Photo failed, trying text: {e}")
+                msg = None
         else:
+            # FIX #5: Track invalid images
+            BOT_STATE["image_failures"] += 1
             logger.warning(f"⚠️ Invalid image: {article['image_url']}")
     
     # Fallback to text
@@ -500,15 +554,24 @@ async def post_to_telegram(article: dict, emoji: str, is_breaking: bool = False)
     
     return False
 
+# FIX #2: Cleanup scheduler - runs every 24 hours
+async def cleanup_scheduler():
+    """Periodic database cleanup task"""
+    while True:
+        try:
+            await asyncio.sleep(24 * 60 * 60)  # 24 hours
+            logger.info("🧹 Starting scheduled DB cleanup...")
+            await db.cleanup_old_records()
+        except Exception as e:
+            logger.error(f"❌ Cleanup scheduler error: { e}")
+
 # =========================== WORKER ===========================
 
 async def worker():
     """Main news processing loop"""
-    global boost_until
-    config.validate_config()
+    # FIX #6: Removed config validation from here (moved to main block)
     await db.init_db()
     logger.info("🚀 MEGA NEWS BOT 2026 STARTED")
-    boost_until = None
     consecutive_errors = 0
     
     # Initial Cleanup
@@ -771,15 +834,24 @@ async def main():
     """Main entry point"""
     await asyncio.gather(
         web_server(),
-        worker()
+        worker(),
+        cleanup_scheduler()  # FIX #2: Add cleanup scheduler
     )
 
 if __name__ == "__main__":
+    # FIX #6: Config validation before asyncio.run
+    try:
+        config.validate_config()
+        logger.info("✅ Config validated")
+    except ValueError as e:
+        logger.critical(f"❌ {e}")
+        exit(1)
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("👋 Bot stopped by user")
-    except Exception as e:
+    except Exception:
         err = traceback.format_exc()
         logger.critical(f"💥 FATAL CRASH:\n{err}")
         

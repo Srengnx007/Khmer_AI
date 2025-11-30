@@ -34,6 +34,14 @@ RATE_LIMITS = {
     "gemini":   {"calls": 15, "period": 60}     # 15/min
 }
 
+# FIX #22: Application Constants
+SIMILARITY_THRESHOLD = 0.85  # Duplicate detection threshold
+MAX_TWEET_LENGTH = 280       # X/Twitter character limit
+IMAGE_MAX_SIZE_MB = 5        # Maximum image size in MB
+POST_DELAY_BOOST = 5         # Seconds between posts in boost mode
+POST_DELAY_NORMAL = 15       # Seconds between posts normally
+TRANSLATION_DELAY = 7        # Seconds delay for translation
+
 # 7. X (Twitter) Settings
 X_API_KEY = os.getenv("X_API_KEY")
 X_API_SECRET = os.getenv("X_API_SECRET")

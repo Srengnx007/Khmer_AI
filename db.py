@@ -22,12 +22,12 @@ async def init_db():
                         )
                     """)
                     
-                    # Migration: Add title column if missing
-                    try:
+                    # FIX #9: Safe migration - Check if 'title' column exists before adding
+                    cur = await db.execute("PRAGMA table_info(posted)")
+                    columns = [row[1] for row in await cur.fetchall()]
+                    if 'title' not in columns:
                         await db.execute("ALTER TABLE posted ADD COLUMN title TEXT")
-                        logger.info("⚠️ Migrated DB: Added 'title' column")
-                    except Exception:
-                        pass # Column likely exists
+                        logger.info("✅ Migrated DB: Added 'title' column")
                     
                     # Translation Cache Table
                     await db.execute("""
