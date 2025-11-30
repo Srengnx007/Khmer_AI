@@ -37,8 +37,8 @@ TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
 TG_LINK_FOR_FB = "https://t.me/AIDailyNewsKH"
 
 # 2. Facebook Settings
-FACEBOOK_PAGE_ID = os.getenv("FACEBOOK_PAGE_ID")
-FACEBOOK_ACCESS_TOKEN = os.getenv("FACEBOOK_ACCESS_TOKEN")
+FB_PAGE_ID = os.getenv("FB_PAGE_ID")
+FB_ACCESS_TOKEN = os.getenv("FB_ACCESS_TOKEN")
 FB_LINK_FOR_TG = "https://www.facebook.com/profile.php?id=61584116626111"
 
 # 3. AI Settings
@@ -235,7 +235,7 @@ async def translate(article):
 
 # =========================== POSTING ===========================
 async def post_to_facebook(article: dict, emoji: str):
-    if not (FACEBOOK_PAGE_ID and FACEBOOK_ACCESS_TOKEN): 
+    if not (FB_PAGE_ID and FB_ACCESS_TOKEN): 
         logger.error("❌ FB Error: Credentials missing!")
         return False
     
@@ -245,8 +245,8 @@ async def post_to_facebook(article: dict, emoji: str):
         async with aiohttp.ClientSession() as s:
             # 1. Try Photo
             if article.get("image_url"):
-                url = f"https://graph.facebook.com/v19.0/{FACEBOOK_PAGE_ID}/photos"
-                params = {"url": article["image_url"], "message": message, "access_token": FACEBOOK_ACCESS_TOKEN, "published": "true"}
+                url = f"https://graph.facebook.com/v19.0/{FB_PAGE_ID}/photos"
+                params = {"url": article["image_url"], "message": message, "access_token": FB_ACCESS_TOKEN, "published": "true"}
                 async with s.post(url, data=params) as r:
                     resp_data = await r.json()
                     if resp_data.get("id"): 
@@ -257,8 +257,8 @@ async def post_to_facebook(article: dict, emoji: str):
                         logger.error(f"❌ FB Photo Failed (Response): {resp_data.get('error', 'Unknown Error')}")
 
             # 2. Link Fallback
-            url = f"https://graph.facebook.com/v19.0/{FACEBOOK_PAGE_ID}/feed"
-            params = {"link": article["link"], "message": message, "access_token": FACEBOOK_ACCESS_TOKEN, "published": "true"}
+            url = f"https://graph.facebook.com/v19.0/{FB_PAGE_ID}/feed"
+            params = {"link": article["link"], "message": message, "access_token": FB_ACCESS_TOKEN, "published": "true"}
             async with s.post(url, data=params) as r:
                 resp_data = await r.json()
                 if resp_data.get("id"): 
