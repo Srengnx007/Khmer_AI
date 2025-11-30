@@ -13,7 +13,9 @@ from bs4 import BeautifulSoup
 import google.generativeai as genai
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, TimedOut
 from aiohttp import web
+import traceback
 
 import config
 import db
@@ -72,7 +74,10 @@ def get_image(entry, base_url: str):
     return None
 
 async def get_article_id(t: str, l: str):
-    return hashlib.md5(f"{t}{l}".encode()).hexdigest()
+    try:
+        return hashlib.md5(f"{t}{l}".encode()).hexdigest()
+    except Exception:
+        return str(hash(f"{t}{l}"))
 
 async def translate(article):
     prompt = f"Translate to natural Khmer:\nTitle: {article['title']}\nContent: {article['summary'][:2500]}\nReturn JSON: {{\"title_kh\": \"...\", \"body_kh\": \"...\"}}"
@@ -159,13 +164,29 @@ async def post_to_telegram(article: dict, emoji: str):
             async with aiohttp.ClientSession() as s:
                 async with s.get(article["image_url"], timeout=10) as r:
                     if r.status == 200:
-                        await bot.send_photo(chat_id=config.TELEGRAM_CHANNEL_ID, photo=await r.read(), caption=caption[:1024], parse_mode=ParseMode.HTML, reply_markup=buttons)
-                        BOT_STATE["tg_posts"] += 1
-                        return True
-        await bot.send_message(chat_id=config.TELEGRAM_CHANNEL_ID, text=caption, parse_mode=ParseMode.HTML, reply_markup=buttons, disable_web_page_preview=False)
-        BOT_STATE["tg_posts"] += 1
-        return True
-    except Exception:
+                        photo_data = await r.read()
+                        for attempt in range(3):
+                            try:
+                                await bot.send_photo(chat_id=config.TELEGRAM_CHANNEL_ID, photo=photo_data, caption=caption[:1024], parse_mode=ParseMode.HTML, reply_markup=buttons)
+                                BOT_STATE["tg_posts"] += 1
+                                return True
+                            except (NetworkError, TimedOut) as e:
+                                logger.warning(f"⚠️ TG Photo Retry {attempt+1}/3: {e}")
+                                await asyncio.sleep(2)
+                        return False
+
+        for attempt in range(3):
+            try:
+                await bot.send_message(chat_id=config.TELEGRAM_CHANNEL_ID, text=caption, parse_mode=ParseMode.HTML, reply_markup=buttons, disable_web_page_preview=False)
+                BOT_STATE["tg_posts"] += 1
+                return True
+            except (NetworkError, TimedOut) as e:
+                logger.warning(f"⚠️ TG Message Retry {attempt+1}/3: {e}")
+                await asyncio.sleep(2)
+        return False
+
+    except Exception as e:
+        logger.error(f"❌ TG Error: {e}")
         BOT_STATE["errors"] += 1
         return False
 
@@ -330,4 +351,10 @@ async def web_server():
 
 async def main(): await asyncio.gather(web_server(), worker())
 
-if __name__ == "__main__": asyncio.run(main())
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        logging.critical(f"💥 FATAL CRASH:\n{traceback.format_exc()}")
