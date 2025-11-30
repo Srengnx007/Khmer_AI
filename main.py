@@ -71,6 +71,17 @@ SAFETY_SETTINGS = {
 
 trigger_event = asyncio.Event()
 
+async def send_error_report(subject: str, message: str):
+    target_id = config.TELEGRAM_LOG_CHANNEL_ID or config.TELEGRAM_PERSONAL_ID
+    if not (config.TELEGRAM_BOT_TOKEN and target_id): return
+
+    text = f"🚨 <b>{subject}</b>\n\n<pre>{message}</pre>"
+    try:
+        bot = Bot(token=config.TELEGRAM_BOT_TOKEN)
+        await bot.send_message(chat_id=target_id, text=text[:4096], parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Failed to send error report: {e}")
+
 # =========================== FETCHING ===========================
 @backoff.on_exception(backoff.expo, (aiohttp.ClientError, asyncio.TimeoutError), max_tries=3)
 async def fetch_rss(url: str):
@@ -305,6 +316,7 @@ async def worker():
 
         except Exception as e:
             logger.error(f"Loop error: {e}")
+            await send_error_report("Worker Loop Error", traceback.format_exc())
             await asyncio.sleep(60)
 
 # =========================== SERVER ===========================
@@ -392,4 +404,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         pass
     except Exception:
-        logging.critical(f"💥 FATAL CRASH:\n{traceback.format_exc()}")
+        err = traceback.format_exc()
+        logging.critical(f"💥 FATAL CRASH:\n{err}")
+        # We need a temporary loop to send the async report from sync context
+        loop = asyncio.new_event_loop()
+        loop.run_until_complete(send_error_report("FATAL CRASH DETECTED", err))
+        loop.close()
