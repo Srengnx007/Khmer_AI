@@ -39,27 +39,55 @@ async def init_db():
     logger.critical("❌ Database initialization FAILED after 3 attempts!")
 
 async def is_posted(aid: str) -> bool:
-    async with db_lock:
-        async with aiosqlite.connect(config.DB_FILE) as db:
-            cur = await db.execute("SELECT 1 FROM posted WHERE article_id=?", (aid,))
-            return await cur.fetchone() is not None
+    for attempt in range(3):
+        try:
+            async with db_lock:
+                async with aiosqlite.connect(config.DB_FILE) as db:
+                    cur = await db.execute("SELECT 1 FROM posted WHERE article_id=?", (aid,))
+                    return await cur.fetchone() is not None
+        except Exception as e:
+            logger.warning(f"⚠️ DB is_posted failed (Attempt {attempt+1}/3): {e}")
+            await asyncio.sleep(2)
+    logger.error("❌ DB is_posted FAILED after 3 attempts")
+    return False
 
 async def mark_as_posted(aid: str, cat: str, source: str):
-    async with db_lock:
-        async with aiosqlite.connect(config.DB_FILE) as db:
-            await db.execute("INSERT OR IGNORE INTO posted(article_id, category, source) VALUES(?, ?, ?)", (aid, cat, source))
-            await db.commit()
+    for attempt in range(3):
+        try:
+            async with db_lock:
+                async with aiosqlite.connect(config.DB_FILE) as db:
+                    await db.execute("INSERT OR IGNORE INTO posted(article_id, category, source) VALUES(?, ?, ?)", (aid, cat, source))
+                    await db.commit()
+            return
+        except Exception as e:
+            logger.warning(f"⚠️ DB mark_as_posted failed (Attempt {attempt+1}/3): {e}")
+            await asyncio.sleep(2)
+    logger.error("❌ DB mark_as_posted FAILED after 3 attempts")
 
 async def get_translation(aid: str):
-    async with db_lock:
-        async with aiosqlite.connect(config.DB_FILE) as db:
-            cur = await db.execute("SELECT title_kh, body_kh FROM translations WHERE article_id=?", (aid,))
-            row = await cur.fetchone()
-            if row: return {"title_kh": row[0], "body_kh": row[1]}
+    for attempt in range(3):
+        try:
+            async with db_lock:
+                async with aiosqlite.connect(config.DB_FILE) as db:
+                    cur = await db.execute("SELECT title_kh, body_kh FROM translations WHERE article_id=?", (aid,))
+                    row = await cur.fetchone()
+                    if row: return {"title_kh": row[0], "body_kh": row[1]}
+            return None
+        except Exception as e:
+            logger.warning(f"⚠️ DB get_translation failed (Attempt {attempt+1}/3): {e}")
+            await asyncio.sleep(2)
+    logger.error("❌ DB get_translation FAILED after 3 attempts")
     return None
 
 async def save_translation(aid: str, title_kh: str, body_kh: str):
-    async with db_lock:
-        async with aiosqlite.connect(config.DB_FILE) as db:
-            await db.execute("INSERT OR REPLACE INTO translations(article_id, title_kh, body_kh) VALUES(?, ?, ?)", (aid, title_kh, body_kh))
-            await db.commit()
+    for attempt in range(3):
+        try:
+            async with db_lock:
+                async with aiosqlite.connect(config.DB_FILE) as db:
+                    await db.execute("INSERT OR REPLACE INTO translations(article_id, title_kh, body_kh) VALUES(?, ?, ?)", (aid, title_kh, body_kh))
+                    await db.commit()
+            return
+        except Exception as e:
+            logger.warning(f"⚠️ DB save_translation failed (Attempt {attempt+1}/3): {e}")
+            await asyncio.sleep(2)
+    logger.error("❌ DB save_translation FAILED after 3 attempts")

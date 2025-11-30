@@ -292,7 +292,7 @@ async def worker():
                         logger.error(f"Err {src['name']}: {e}")
                         BOT_STATE["errors"] += 1
 
-            next_wait = 60 if boost_until else config.CHECK_INTERVAL
+            next_wait = 60 if boost_until else slot["delay"]
             next_time = (datetime.now(config.ICT) + timedelta(seconds=next_wait)).strftime("%H:%M:%S")
             BOT_STATE["next_run"] = next_time
             BOT_STATE["status"] = "Sleeping"
