@@ -305,7 +305,7 @@ async def post_to_x(article: dict, emoji: str):
     try:
         # Placeholder for https://api.twitter.com/2/tweets
         # Real OAuth1.0a/OAuth2.0 logic omitted for structure
-        logger.info(f"✅ X Post (Simulated) to https://api.twitter.com/2/tweets: {msg[:50]}...")
+        logger.info(f"✅ X POST (SIMULATED): {msg[:50]}...")
         return True
     except Exception as e:
         logger.error(f"X Post Failed: {e}")
@@ -324,7 +324,7 @@ async def post_to_facebook(article: dict, emoji: str):
         f"__________________\n"
         f"👉 Telegram: {config.TG_LINK_FOR_FB}\n"
         f"👉 Facebook: {config.FB_LINK_FOR_TG}\n"
-        f"👉 X (Twitter): https://x.com/{config.X_USERNAME.strip('@')}"
+        f"👉 X (Twitter): https://x.com/{config.X_USERNAME}"
     )
     
     api_ver = config.FB_API_VERSION
@@ -395,7 +395,7 @@ async def post_to_telegram(article: dict, emoji: str, is_breaking: bool = False)
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton("អានពេញ 📰", url=article["link"])],
         [InlineKeyboardButton("Facebook Page 📘", url=config.FB_LINK_FOR_TG)],
-        [InlineKeyboardButton("X (Twitter) 🐦", url=f"https://x.com/{config.X_USERNAME.strip('@')}")]
+        [InlineKeyboardButton("X (Twitter) 🐦", url=f"https://x.com/{config.X_USERNAME}")]
     ])
     
     msg = None
