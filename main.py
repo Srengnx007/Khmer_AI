@@ -322,9 +322,9 @@ async def post_to_facebook(article: dict, emoji: str):
         f"{emoji} {article['title_kh']}\n\n"
         f"{article['body_kh']}\n\n"
         f"__________________\n"
-        f"ប្រភព: {article['source']}\n"
-        f"👉 តាមដាន Telegram: {config.TG_LINK_FOR_FB}\n"
-        f"អានបន្ថែម: {article['link']}"
+        f"👉 Telegram: {config.TG_LINK_FOR_FB}\n"
+        f"👉 Facebook: {config.FB_LINK_FOR_TG}\n"
+        f"👉 X (Twitter): https://x.com/{config.X_USERNAME.strip('@')}"
     )
     
     api_ver = config.FB_API_VERSION
@@ -387,13 +387,15 @@ async def post_to_telegram(article: dict, emoji: str, is_breaking: bool = False)
         f"{emoji} {title_prefix}<b>{article['title_kh']}</b>\n\n"
         f"{article['body_kh']}\n\n"
         f"━━━━━━━━━━━━━━━━━\n"
-        f"ប្រភព: {article['source']}\n"
+        f"🔗 Link: {article['link']}\n"
+        f"X: {config.X_USERNAME}\n"
         f"{datetime.now(config.ICT):%d/%m/%Y • %H:%M}"
     )
     
     buttons = InlineKeyboardMarkup([
         [InlineKeyboardButton("អានពេញ 📰", url=article["link"])],
-        [InlineKeyboardButton("Facebook Page 📘", url=config.FB_LINK_FOR_TG)]
+        [InlineKeyboardButton("Facebook Page 📘", url=config.FB_LINK_FOR_TG)],
+        [InlineKeyboardButton("X (Twitter) 🐦", url=f"https://x.com/{config.X_USERNAME.strip('@')}")]
     ])
     
     msg = None
@@ -545,7 +547,7 @@ async def worker():
                             
                             logger.info(
                                 f"✅ Posted: {article['title_kh'][:40]}... "
-                                f"[FB: {fb_ok}, TG: {tg_ok}]"
+                                f"[FB: {fb_ok}, TG: {tg_ok}, X: {x_ok}]"
                             )
                             
                             # Delay between posts
