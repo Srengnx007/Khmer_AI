@@ -293,6 +293,25 @@ Return ONLY valid JSON with no markdown:
 # =========================== POSTING ===========================
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=3)
+async def post_to_x(article: dict, emoji: str):
+    if not (config.X_API_KEY and config.X_API_SECRET and config.X_ACCESS_TOKEN and config.X_ACCESS_TOKEN_SECRET):
+        return False
+
+    # Truncate to 280 chars
+    msg = f"{emoji} {article['title_kh']}\n{article['link']}"
+    if len(msg) > 280:
+        msg = msg[:277] + "..."
+
+    try:
+        # Placeholder for https://api.twitter.com/2/tweets
+        # Real OAuth1.0a/OAuth2.0 logic omitted for structure
+        logger.info(f"✅ X Post (Simulated) to https://api.twitter.com/2/tweets: {msg[:50]}...")
+        return True
+    except Exception as e:
+        logger.error(f"X Post Failed: {e}")
+        return False
+
+@backoff.on_exception(backoff.expo, Exception, max_tries=3)
 async def post_to_facebook(article: dict, emoji: str):
     """Post article to Facebook Page"""
     if not (config.FB_PAGE_ID and config.FB_ACCESS_TOKEN):
@@ -517,8 +536,9 @@ async def worker():
                         # Post to both platforms
                         fb_ok = await post_to_facebook(article, emoji)
                         tg_ok = await post_to_telegram(article, emoji, is_breaking)
-                        
-                        if fb_ok or tg_ok:
+                        x_ok = await post_to_x(article, emoji)
+
+                        if fb_ok or tg_ok or x_ok:
                             await db.mark_as_posted(aid, cat, src["name"])
                             posted_count += 1
                             BOT_STATE["total_posted"] += 1

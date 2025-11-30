@@ -26,6 +26,12 @@ GEMINI_MODEL = "gemini-2.0-flash"
 FB_API_VERSION = "v19.0" 
 CHECK_INTERVAL = 900  # 15 minutes normal cycle
 
+# 7. X (Twitter) Settings
+X_API_KEY = os.getenv("X_API_KEY")
+X_API_SECRET = os.getenv("X_API_SECRET")
+X_ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
+X_ACCESS_TOKEN_SECRET = os.getenv("X_ACCESS_TOKEN_SECRET")
+
 # 4. System Settings
 ICT = pytz.timezone('Asia/Phnom_Penh')
 DB_FILE = "posted_articles.db"
