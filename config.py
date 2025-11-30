@@ -58,7 +58,6 @@ NEWS_SOURCES = {
     "thai": [
         {"name": "Bangkok Post",   "rss": "https://www.bangkokpost.com/rss/feed/news",       "url": "https://www.bangkokpost.com"},
         {"name": "Khaosod English","rss": "https://www.khaosodenglish.com/feed",             "url": "https://www.khaosodenglish.com"},
-        {"name": "Thai PBS",       "rss": "https://english.thaipbs.or.th/feed",              "url": "https://english.thaipbs.or.th"},
     ],
     "vietnamese": [
         {"name": "VN Express",     "rss": "https://e.vnexpress.net/rss/news.rss",            "url": "https://e.vnexpress.net"},
