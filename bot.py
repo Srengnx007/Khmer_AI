@@ -388,15 +388,15 @@ HTML = """
     <meta http-equiv="refresh" content="30">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: sans-serif; background: #121212; color: #fff; padding: 20px; }
-        .container { max-width: 800px; margin: 0 auto; }
-        h1 { text-align: center; color: #4CAF50; }
-        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin: 20px 0; }
-        .card { background: #1e1e1e; padding: 20px; border-radius: 8px; text-align: center; }
-        .card h3 { margin: 0; font-size: 2em; color: #2196F3; }
-        .btn { width: 100%; padding: 15px; background: #E91E63; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 1.2em; }
-        .log-box { background: #000; padding: 10px; height: 300px; overflow-y: auto; font-family: monospace; border: 1px solid #333; }
-        .log-entry { border-bottom: 1px solid #222; padding: 2px 0; }
+        body {{ font-family: sans-serif; background: #121212; color: #fff; padding: 20px; }}
+        .container {{ max-width: 800px; margin: 0 auto; }}
+        h1 {{ text-align: center; color: #4CAF50; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px; margin: 20px 0; }}
+        .card {{ background: #1e1e1e; padding: 20px; border-radius: 8px; text-align: center; }}
+        .card h3 {{ margin: 0; font-size: 2em; color: #2196F3; }}
+        .btn {{ width: 100%; padding: 15px; background: #E91E63; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 1.2em; }}
+        .log-box {{ background: #000; padding: 10px; height: 300px; overflow-y: auto; font-family: monospace; border: 1px solid #333; }}
+        .log-entry {{ border-bottom: 1px solid #222; padding: 2px 0; }}
     </style>
 </head>
 <body>
