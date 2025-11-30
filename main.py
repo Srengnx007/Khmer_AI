@@ -12,6 +12,9 @@ from collections import deque
 import aiohttp
 import feedparser
 import backoff
+import tweepy
+import difflib
+from collections import defaultdict
 from bs4 import BeautifulSoup
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
@@ -46,8 +49,41 @@ BOT_STATE = {
     "errors": 0,
     "translations": 0,
     "cache_hits": 0,
+    "tg_posts": 0,
+    "x_posts": 0,
+    "errors": 0,
+    "duplicate_skips": 0,
+    "image_failures": 0,
+    "sources_health": defaultdict(lambda: {'success': 0, 'fail': 0}),
     "logs": deque(maxlen=50)
 }
+
+# Rate Limit Trackers
+API_USAGE = defaultdict(list)
+
+def check_platform_rate_limit(platform: str) -> bool:
+    """Check if we can make a call to the platform"""
+    limit = config.RATE_LIMITS.get(platform)
+    if not limit: return True
+    
+    now = datetime.now().timestamp()
+    # Clean old calls
+    API_USAGE[platform] = [t for t in API_USAGE[platform] if now - t < limit["period"]]
+    
+    if len(API_USAGE[platform]) >= limit["calls"]:
+        logger.warning(f"⚠️ Rate limit hit for {platform}")
+        return False
+        
+    API_USAGE[platform].append(now)
+    return True
+
+def is_similar_to_recent(title: str, recent_titles: list) -> bool:
+    """Check if title is similar to any recent titles"""
+    for recent in recent_titles:
+        ratio = difflib.SequenceMatcher(None, title, recent).ratio()
+        if ratio > 0.85:
+            return True
+    return False
 
 class DashboardHandler(logging.Handler):
     def emit(self, record):
@@ -297,16 +333,31 @@ async def post_to_x(article: dict, emoji: str):
     if not (config.X_API_KEY and config.X_API_SECRET and config.X_ACCESS_TOKEN and config.X_ACCESS_TOKEN_SECRET):
         return False
 
-    # Truncate to 280 chars
-    msg = f"{emoji} {article['title_kh']}\n{article['link']}"
-    if len(msg) > 280:
-        msg = msg[:277] + "..."
+    if not check_platform_rate_limit("x"): return False
 
     try:
-        # Placeholder for https://api.twitter.com/2/tweets
-        # Real OAuth1.0a/OAuth2.0 logic omitted for structure
-        logger.info(f"✅ X POST (SIMULATED): {msg[:50]}...")
+        client = tweepy.Client(
+            consumer_key=config.X_API_KEY,
+            consumer_secret=config.X_API_SECRET,
+            access_token=config.X_ACCESS_TOKEN,
+            access_token_secret=config.X_ACCESS_TOKEN_SECRET
+        )
+        
+        # Smart Truncate
+        title = article['title_kh']
+        link = article['link']
+        max_len = 280 - len(link) - 5 # 5 for emoji/spaces
+        
+        if len(title) > max_len:
+            title = title[:max_len-3] + "..."
+            
+        text = f"{emoji} {title}\n{link}"
+        
+        await asyncio.to_thread(client.create_tweet, text=text)
+        BOT_STATE["x_posts"] += 1
+        logger.info(f"✅ X Posted: {title[:30]}...")
         return True
+        
     except Exception as e:
         logger.error(f"X Post Failed: {e}")
         return False
@@ -454,73 +505,71 @@ async def post_to_telegram(article: dict, emoji: str, is_breaking: bool = False)
 async def worker():
     """Main news processing loop"""
     global boost_until
-    
+    config.validate_config()
     await db.init_db()
     logger.info("🚀 MEGA NEWS BOT 2026 STARTED")
+    boost_until = None
+    consecutive_errors = 0
+    
+    # Initial Cleanup
+    await db.cleanup_old_records()
     
     while True:
         try:
             BOT_STATE["last_run"] = datetime.now(config.ICT).strftime("%H:%M:%S")
             now = datetime.now(config.ICT)
             slot = config.get_current_slot()
-            
-            # Check trigger
+
             if trigger_event.is_set():
                 logger.info("⚡ Manual Trigger Executing!")
                 trigger_event.clear()
                 max_posts = 10
-                delay = 60
-            # Check boost mode
             elif boost_until and now < boost_until:
                 max_posts = 15
-                delay = 60
-                logger.info("🔥 BOOST MODE ACTIVE")
+                logger.info("🔥 BOOST ACTIVE")
             else:
                 max_posts = max(1, slot["max"] // 4)
-                delay = slot["delay"]
                 boost_until = None
-            
+
             BOT_STATE["status"] = f"Processing ({slot['name']})"
             posted_count = 0
             
-            categories = [
-                ("cambodia", "🇰🇭"),
-                ("international", "🌏"),
-                ("thai", "🇹🇭"),
-                ("vietnamese", "🇻🇳"),
-                ("china", "🇨🇳"),
-                ("tech", "💻"),
-                ("crypto", "₿")
-            ]
+            # Get recent titles for duplicate check
+            recent_titles = await db.get_recent_titles()
             
+            categories = [
+                ("cambodia", "🇰🇭"), ("international", "🌍"), 
+                ("thai", "🇹🇭"), ("vietnamese", "🇻🇳"), 
+                ("china", "🇨🇳"), ("tech", "💻"), ("crypto", "₿")
+            ]
+
             for cat, emoji in categories:
-                if posted_count >= max_posts:
-                    break
-                
+                if posted_count >= max_posts: break
                 for src in config.NEWS_SOURCES.get(cat, []):
-                    if posted_count >= max_posts:
-                        break
-                    
+                    if posted_count >= max_posts: break
                     try:
                         feed = await fetch_rss(src["rss"])
-                        if not feed or not feed.entries:
+                        if not feed or not feed.entries: 
+                            BOT_STATE["sources_health"][src["name"]]["fail"] += 1
                             continue
                         
-                        entry = feed.entries[0]
-                        aid = await get_article_id(entry.title, entry.link)
+                        BOT_STATE["sources_health"][src["name"]]["success"] += 1
+                        e = feed.entries[0]
+                        aid = await get_article_id(e.title, e.link)
                         
-                        if await db.is_posted(aid):
+                        if await db.is_posted(aid): continue
+                        
+                        # Duplicate Check
+                        if is_similar_to_recent(e.title, recent_titles):
+                            logger.info(f"⏭️ Skipped Duplicate: {e.title[:30]}...")
+                            BOT_STATE["duplicate_skips"] += 1
+                            await db.mark_as_posted(aid, e.title, cat, src["name"]) # Mark to skip future checks
                             continue
-                        
-                        # Build article
+
                         article = {
-                            "title": entry.title,
-                            "link": entry.link,
-                            "summary": BeautifulSoup(
-                                entry.get("summary", ""),
-                                "html.parser"
-                            ).get_text(strip=True)[:1000],
-                            "image_url": get_image(entry, src["url"]),
+                            "title": e.title, "link": e.link,
+                            "summary": BeautifulSoup(e.get("summary",""), "html.parser").get_text(strip=True)[:1000],
+                            "image_url": get_image(e, src["url"]),
                             "source": src["name"]
                         }
                         
@@ -532,18 +581,30 @@ async def worker():
                             emoji = "🚨 " + emoji
                             is_breaking = True
                         
-                        # Translate
+                        # Translate (Rate Limit Check inside not needed as it's 15/min and we are slow)
+                        if not check_platform_rate_limit("gemini"):
+                            logger.warning("Gemini Rate Limit Hit - Skipping")
+                            continue
+                            
                         article = await translate(article)
                         
-                        # Post to both platforms
-                        fb_ok = await post_to_facebook(article, emoji)
-                        tg_ok = await post_to_telegram(article, emoji, is_breaking)
+                        # Post to platforms with Rate Checks
+                        fb_ok = False
+                        if check_platform_rate_limit("facebook"):
+                            fb_ok = await post_to_facebook(article, emoji)
+                            
+                        tg_ok = False
+                        if check_platform_rate_limit("telegram"):
+                            tg_ok = await post_to_telegram(article, emoji, is_breaking)
+                            
                         x_ok = await post_to_x(article, emoji)
 
                         if fb_ok or tg_ok or x_ok:
-                            await db.mark_as_posted(aid, cat, src["name"])
+                            await db.mark_as_posted(aid, article["title"], cat, src["name"])
+                            recent_titles.append(article["title"]) # Update local cache
                             posted_count += 1
                             BOT_STATE["total_posted"] += 1
+                            consecutive_errors = 0 # Reset error counter
                             
                             logger.info(
                                 f"✅ Posted: {article['title_kh'][:40]}... "
@@ -557,41 +618,31 @@ async def worker():
                     except Exception as e:
                         logger.error(f"❌ Error processing {src['name']}: {e}")
                         BOT_STATE["errors"] += 1
+                        BOT_STATE["sources_health"][src["name"]]["fail"] += 1
             
             # Calculate next run
-            next_wait = delay
-            next_time = (
-                datetime.now(config.ICT) + timedelta(seconds=next_wait)
-            ).strftime("%H:%M:%S")
-            
+            next_wait = 60 if boost_until else slot["delay"]
+            next_time = (datetime.now(config.ICT) + timedelta(seconds=next_wait)).strftime("%H:%M:%S")
             BOT_STATE["next_run"] = next_time
             BOT_STATE["status"] = "Sleeping"
             
-            logger.info(
-                f"✓ Cycle done. Posted: {posted_count}/{max_posts}. "
-                f"Next: {next_time}"
-            )
+            logger.info(f"✓ Cycle done. Posted: {posted_count}. Next: {next_time}")
             
-            # Wait with trigger support
             try:
                 await asyncio.wait_for(trigger_event.wait(), timeout=next_wait)
-                logger.info("⚡ Manual trigger received!")
-                trigger_event.clear()
             except asyncio.TimeoutError:
-                # Normal timeout
-                pass
-        
-        except Exception as e:
-            logger.error(f"❌ Worker loop error: {e}")
-            BOT_STATE["errors"] += 1
-            
-            await send_error_report(
-                "Worker Loop Error",
-                traceback.format_exc()
-            )
-            
-            await asyncio.sleep(60)
+                pass 
 
+        except Exception as e:
+            consecutive_errors += 1
+            wait_time = min(300, 60 * (2 ** max(0, consecutive_errors - 5)))
+            logger.error(f"Loop error (Count {consecutive_errors}): {e}. Waiting {wait_time}s")
+            
+            if consecutive_errors >= 5:
+                await send_error_report(f"Persistent Worker Error ({consecutive_errors})", traceback.format_exc())
+                
+            await asyncio.sleep(wait_time)
+        
 # =========================== WEB SERVER ===========================
 
 HTML = """<!DOCTYPE html>
@@ -634,9 +685,9 @@ HTML = """<!DOCTYPE html>
             <div class="card"><h3>{total_posted}</h3><p>Total Posts</p></div>
             <div class="card"><h3>{fb_posts}</h3><p>Facebook</p></div>
             <div class="card"><h3>{tg_posts}</h3><p>Telegram</p></div>
-            <div class="card"><h3>{translations}</h3><p>Translations</p></div>
-            <div class="card"><h3>{cache_hits}</h3><p>Cache Hits</p></div>
-            <div class="card"><h3 style="color:#f44336">{errors}</h3><p>Errors</p></div>
+            <div class="card"><h3>{x_posts}</h3><p>X / Twitter</p></div>
+            <div class="card"><h3 style="color:orange">{duplicate_skips}</h3><p>Skips</p></div>
+            <div class="card"><h3 style="color:red">{errors}</h3><p>Errors</p></div>
         </div>
         <h3>📜 Live Logs</h3>
         <div class="log-box">{logs}</div>
@@ -651,22 +702,18 @@ async def dashboard(request):
         for log in BOT_STATE["logs"]
     ])
     
-    return web.Response(
-        text=HTML.format(
-            status=BOT_STATE["status"],
-            last_run=BOT_STATE["last_run"],
-            next_run=BOT_STATE["next_run"],
-            total_posted=BOT_STATE["total_posted"],
-            fb_posts=BOT_STATE["fb_posts"],
-            tg_posts=BOT_STATE["tg_posts"],
-            translations=BOT_STATE["translations"],
-            cache_hits=BOT_STATE["cache_hits"],
-            errors=BOT_STATE["errors"],
-            logs=logs_html
-        ),
-        content_type='text/html',
-        charset='utf-8'
-    )
+    return web.Response(text=HTML.format(
+        status=BOT_STATE["status"],
+        last_run=BOT_STATE["last_run"],
+        next_run=BOT_STATE["next_run"],
+        total_posted=BOT_STATE["total_posted"],
+        fb_posts=BOT_STATE["fb_posts"],
+        tg_posts=BOT_STATE["tg_posts"],
+        x_posts=BOT_STATE["x_posts"],
+        duplicate_skips=BOT_STATE["duplicate_skips"],
+        errors=BOT_STATE["errors"],
+        logs=logs_html
+    ), content_type='text/html')
 
 async def trigger_check(request):
     """Manual trigger endpoint"""

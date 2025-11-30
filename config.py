@@ -26,6 +26,14 @@ GEMINI_MODEL = "gemini-2.0-flash"
 FB_API_VERSION = "v19.0" 
 CHECK_INTERVAL = 900  # 15 minutes normal cycle
 
+# Rate Limits (Calls per window)
+RATE_LIMITS = {
+    "telegram": {"calls": 30, "period": 60},    # 30/min
+    "facebook": {"calls": 200, "period": 3600}, # 200/hr
+    "x":        {"calls": 50, "period": 900},   # 50/15min
+    "gemini":   {"calls": 15, "period": 60}     # 15/min
+}
+
 # 7. X (Twitter) Settings
 X_API_KEY = os.getenv("X_API_KEY")
 X_API_SECRET = os.getenv("X_API_SECRET")
@@ -109,4 +117,18 @@ def is_breaking_news(article):
     
     if article['source'] in ["Khmer Times", "BBC News", "CNN", "Thmey Thmey"]: score += 20
     
+    if article['source'] in ["Khmer Times", "BBC News", "CNN", "Thmey Thmey"]: score += 20
+    
     return score >= 100
+
+def validate_config():
+    required = [
+        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHANNEL_ID",
+        "FB_PAGE_ID", "FB_ACCESS_TOKEN",
+        "GEMINI_API_KEY",
+        "X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET"
+    ]
+    missing = [key for key in required if not os.getenv(key)]
+    if missing:
+        raise ValueError(f"❌ Missing Required Config: {', '.join(missing)}")
+    return True

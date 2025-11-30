@@ -7,4 +7,4 @@ python-telegram-bot
 aiosqlite
 pytz
 backoff
-python-twitter
+tweepy

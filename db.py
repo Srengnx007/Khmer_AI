@@ -15,11 +15,19 @@ async def init_db():
                     await db.execute("""
                         CREATE TABLE IF NOT EXISTS posted (
                             article_id TEXT PRIMARY KEY,
+                            title TEXT,
                             category TEXT,
                             source TEXT,
                             posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     """)
+                    
+                    # Migration: Add title column if missing
+                    try:
+                        await db.execute("ALTER TABLE posted ADD COLUMN title TEXT")
+                        logger.info("⚠️ Migrated DB: Added 'title' column")
+                    except Exception:
+                        pass # Column likely exists
                     
                     # Translation Cache Table
                     await db.execute("""
@@ -51,18 +59,35 @@ async def is_posted(aid: str) -> bool:
     logger.error("❌ DB is_posted FAILED after 3 attempts")
     return False
 
-async def mark_as_posted(aid: str, cat: str, source: str):
+async def mark_as_posted(aid: str, title: str, cat: str, source: str):
     for attempt in range(3):
         try:
             async with db_lock:
                 async with aiosqlite.connect(config.DB_FILE) as db:
-                    await db.execute("INSERT OR IGNORE INTO posted(article_id, category, source) VALUES(?, ?, ?)", (aid, cat, source))
+                    await db.execute("INSERT OR IGNORE INTO posted(article_id, title, category, source) VALUES(?, ?, ?, ?)", (aid, title, cat, source))
                     await db.commit()
             return
         except Exception as e:
             logger.warning(f"⚠️ DB mark_as_posted failed (Attempt {attempt+1}/3): {e}")
             await asyncio.sleep(2)
     logger.error("❌ DB mark_as_posted FAILED after 3 attempts")
+
+async def get_recent_titles(hours: int = 24):
+    async with db_lock:
+        async with aiosqlite.connect(config.DB_FILE) as db:
+            cur = await db.execute(
+                "SELECT title FROM posted WHERE posted_at > datetime('now', ?)", 
+                (f'-{hours} hours',)
+            )
+            return [row[0] for row in await cur.fetchall() if row[0]]
+
+async def cleanup_old_records(days: int = 30):
+    async with db_lock:
+        async with aiosqlite.connect(config.DB_FILE) as db:
+            await db.execute("DELETE FROM posted WHERE posted_at < datetime('now', ?)", (f'-{days} days',))
+            await db.execute("DELETE FROM translations WHERE cached_at < datetime('now', ?)", (f'-{days} days',))
+            await db.commit()
+            logger.info("🧹 DB Cleanup Completed")
 
 async def get_translation(aid: str):
     for attempt in range(3):
