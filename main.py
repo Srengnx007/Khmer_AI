@@ -49,7 +49,7 @@ BOT_STATE = {
 class DashboardHandler(logging.Handler):
     def emit(self, record):
         timestamp = datetime.now(config.ICT).strftime("%H:%M:%S")
-        BOT_STATE["logs"].appendleft(f"[{timestamp}] {record.getMessage()}")
+        BOT_STATE["logs"].appendleft(f"[{timestamp}] {record.levelname} - {record.getMessage()}")
 
 logger = logging.getLogger("KhmerNewsBot")
 logger.setLevel(logging.INFO)

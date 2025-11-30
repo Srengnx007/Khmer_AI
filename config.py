@@ -22,7 +22,7 @@ FB_LINK_FOR_TG = "https://www.facebook.com/profile.php?id=61584116626111"
 
 # 3. AI Settings
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-1.5-flash"
+GEMINI_MODEL = "gemini-2.0-flash"
 FB_API_VERSION = "v19.0" 
 CHECK_INTERVAL = 900  # 15 minutes normal cycle
 
