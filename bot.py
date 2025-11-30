@@ -235,25 +235,42 @@ async def translate(article):
 
 # =========================== POSTING ===========================
 async def post_to_facebook(article: dict, emoji: str):
-    if not (FACEBOOK_PAGE_ID and FACEBOOK_ACCESS_TOKEN): return False
+    if not (FACEBOOK_PAGE_ID and FACEBOOK_ACCESS_TOKEN): 
+        logger.error("❌ FB Error: Credentials missing!")
+        return False
+    
     message = f"{emoji} {article['title_kh']}\n\n{article['body_kh']}\n\n__________________\nប្រភព: {article['source']}\n👉 តាមដាន Telegram: {TG_LINK_FOR_FB}\nអានបន្ថែម: {article['link']}"
+
     try:
         async with aiohttp.ClientSession() as s:
+            # 1. Try Photo
             if article.get("image_url"):
                 url = f"https://graph.facebook.com/v19.0/{FACEBOOK_PAGE_ID}/photos"
                 params = {"url": article["image_url"], "message": message, "access_token": FACEBOOK_ACCESS_TOKEN, "published": "true"}
                 async with s.post(url, data=params) as r:
-                    if (await r.json()).get("id"): 
+                    resp_data = await r.json()
+                    if resp_data.get("id"): 
                         BOT_STATE["fb_posts"] += 1
+                        logger.info(f"✅ FB PHOTO Posted: {resp_data.get('id')}")
                         return True
-            
+                    else:
+                        logger.error(f"❌ FB Photo Failed (Response): {resp_data.get('error', 'Unknown Error')}")
+
+            # 2. Link Fallback
             url = f"https://graph.facebook.com/v19.0/{FACEBOOK_PAGE_ID}/feed"
             params = {"link": article["link"], "message": message, "access_token": FACEBOOK_ACCESS_TOKEN, "published": "true"}
             async with s.post(url, data=params) as r:
-                if (await r.json()).get("id"): 
+                resp_data = await r.json()
+                if resp_data.get("id"): 
                     BOT_STATE["fb_posts"] += 1
+                    logger.info(f"✅ FB Link Posted: {resp_data.get('id')}")
                     return True
-    except: pass
+                else:
+                    logger.error(f"❌ FB Link Failed (Response): {resp_data.get('error', 'Unknown Error')}")
+
+    except Exception as e:
+        logger.error(f"❌ FB EXCEPTION: {e}")
+        
     return False
 
 async def post_to_telegram(article: dict, emoji: str):
