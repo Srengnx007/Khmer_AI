@@ -81,13 +81,13 @@ NEWS_SOURCES = {
 def get_current_slot():
     now = datetime.now(ICT)
     h = now.hour + now.minute / 60
-    if 5 <= h < 8:       return {"name": "Morning 🌅",      "max": 8}
-    if 8 <= h < 11.5:    return {"name": "Work AM 💼",      "max": 5}
-    if 11.5 <= h < 13.5: return {"name": "Lunch Peak 🍱",   "max": 8}
-    if 13.5 <= h < 17:   return {"name": "Afternoon ☕",    "max": 5}
-    if 17 <= h < 21:     return {"name": "Prime Time 📺",   "max": 10}
-    if 21 <= h < 23:     return {"name": "Night 🌙",        "max": 4}
-    return                       {"name": "Deep Night 💤",   "max": 1}
+    if 5 <= h < 8:       return {"name": "Morning 🌅",      "max": 8, "delay": 60}
+    if 8 <= h < 11.5:    return {"name": "Work AM 💼",      "max": 5, "delay": 90}
+    if 11.5 <= h < 13.5: return {"name": "Lunch Peak 🍱",   "max": 8, "delay": 45}
+    if 13.5 <= h < 17:   return {"name": "Afternoon ☕",    "max": 5, "delay": 120}
+    if 17 <= h < 21:     return {"name": "Prime Time 📺",   "max": 10, "delay": 40}
+    if 21 <= h < 23:     return {"name": "Night 🌙",        "max": 4, "delay": 150}
+    return                       {"name": "Deep Night 💤",   "max": 1, "delay": 300}
 
 def is_breaking_news(article):
     score = 0

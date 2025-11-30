@@ -259,7 +259,7 @@ async def worker():
                             BOT_STATE["total_posted"] += 1
                             logging.info(f"✅ Posted: {article['title_kh'][:30]}")
                             if boost_until: await asyncio.sleep(5)
-                            else: await asyncio.sleep(15)
+                            else: await asyncio.sleep(slot["delay"])
 
                     except Exception as e:
                         logging.error(f"Err {src['name']}: {e}")
