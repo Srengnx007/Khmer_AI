@@ -12,3 +12,4 @@ Pillow
 structlog
 prometheus-client
 psutil
+deep-translator

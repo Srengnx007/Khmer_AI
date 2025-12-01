@@ -1,6 +1,7 @@
 import aiosqlite
 import asyncio
 import logging
+import json
 import config
 
 logger = logging.getLogger(__name__)
@@ -29,13 +30,15 @@ async def init_db():
                         await db.execute("ALTER TABLE posted ADD COLUMN title TEXT")
                         logger.info("✅ Migrated DB: Added 'title' column")
                     
-                    # Translation Cache Table
+                    # Translation Cache Table (Multi-language)
                     await db.execute("""
-                        CREATE TABLE IF NOT EXISTS translations (
-                            article_id TEXT PRIMARY KEY,
-                            title_kh TEXT,
-                            body_kh TEXT,
-                            cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        CREATE TABLE IF NOT EXISTS translation_cache (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            article_id TEXT,
+                            language TEXT,
+                            content TEXT, -- JSON serialized {title, body, summary}
+                            cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            UNIQUE(article_id, language)
                         )
                     """)
                     # Pending Posts Queue (for Scheduler)
@@ -133,27 +136,27 @@ async def cleanup_old_records():
 
 # =========================== TRANSLATION CACHE ===========================
 
-async def get_translation(aid: str):
+async def get_translation(aid: str, lang: str):
     """Get cached translation"""
     try:
         async with db_lock:
             async with aiosqlite.connect(config.DB_FILE) as db:
-                async with db.execute("SELECT title_kh, body_kh FROM translations WHERE article_id=?", (aid,)) as cursor:
+                async with db.execute("SELECT content FROM translation_cache WHERE article_id=? AND language=?", (aid, lang)) as cursor:
                     row = await cursor.fetchone()
                     if row:
-                        return {"title_kh": row[0], "body_kh": row[1]}
+                        return json.loads(row[0])
     except Exception as e:
         logger.error(f"❌ DB Cache Get Error: {e}")
     return None
 
-async def save_translation(aid: str, title_kh: str, body_kh: str):
+async def save_translation(aid: str, lang: str, content: dict):
     """Save translation to cache"""
     try:
         async with db_lock:
             async with aiosqlite.connect(config.DB_FILE) as db:
                 await db.execute(
-                    "INSERT OR REPLACE INTO translations(article_id, title_kh, body_kh) VALUES(?, ?, ?)",
-                    (aid, title_kh, body_kh)
+                    "INSERT OR REPLACE INTO translation_cache(article_id, language, content) VALUES(?, ?, ?)",
+                    (aid, lang, json.dumps(content))
                 )
                 await db.commit()
     except Exception as e:

@@ -13,6 +13,7 @@ from quality_scorer import scorer
 from image_processor import image_processor
 from metrics import metrics
 from scheduler import scheduler
+from translation_manager import translator
 import logger_config
 
 # Configure Logger
@@ -386,119 +387,6 @@ class CircuitBreaker:
 
 gemini_circuit = CircuitBreaker()
 
-# Translation failure tracking
-TRANSLATION_FAILURES = {}
-
-@backoff.on_exception(backoff.expo, (RateLimitError, aiohttp.ClientError), max_tries=3, jitter=backoff.full_jitter)
-async def translate(article: dict):
-    """Translate article to Khmer with caching, retries, and circuit breaker"""
-    aid = await get_article_id(article['title'], article['link'])
-    
-    # Check cache first
-    cached = await db.get_translation(aid)
-    if cached:
-        article["title_kh"] = cached["title_kh"]
-        article["body_kh"] = cached["body_kh"]
-        BOT_STATE["cache_hits"] += 1
-        logger.debug(f"✅ Cache hit for: {article['title'][:30]}")
-        return article
-
-    # Circuit Breaker Check
-    if not gemini_circuit.allow_request():
-        logger.warning("🔌 Circuit Breaker OPEN: Skipping translation")
-        return article
-
-    # Rate limit check handled in worker
-    
-    # Prompt Engineering
-    base_prompt = """Translate to natural, engaging Khmer for Telegram news:
-    
-    Title: {title}
-    Summary: {summary}
-    
-    Output JSON only: {{"title_kh": "...", "body_kh": "..."}}"""
-    
-    simple_prompt = """Translate to Khmer JSON: {{"title_kh": "...", "body_kh": "..."}}
-    
-    {title}
-    {summary}"""
-
-    model = genai.GenerativeModel(config.GEMINI_MODEL)
-    
-    try:
-        # Attempt Translation
-        try:
-            response = await model.generate_content_async(
-                base_prompt.format(title=article["title"], summary=article["summary"]),
-                safety_settings=SAFETY_SETTINGS
-            )
-        except Exception as e:
-            # Fallback to simple prompt if complex fails
-            logger.warning(f"⚠️ Complex prompt failed, trying simple: {e}")
-            response = await model.generate_content_async(
-                simple_prompt.format(title=article["title"], summary=article["summary"]),
-                safety_settings=SAFETY_SETTINGS
-            )
-
-        # Handle Safety Blocks
-        if response.prompt_feedback and response.prompt_feedback.block_reason:
-            raise SafetyBlockError(f"Blocked: {response.prompt_feedback.block_reason}")
-            
-        if not response.parts:
-            raise TranslationError("Empty response from Gemini")
-
-        text = response.text
-        
-        # Parse JSON
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start == -1 or end == -1:
-            raise ParseError("No JSON found in response")
-            
-        data = json.loads(text[start:end])
-        
-        # Validate Schema
-        if "title_kh" not in data or "body_kh" not in data:
-            raise ParseError("Missing required keys in JSON")
-
-        article["title_kh"] = data["title_kh"]
-        article["body_kh"] = data["body_kh"]
-        
-        # Save to cache
-        await db.save_translation(aid, article["title_kh"], article["body_kh"])
-        
-        BOT_STATE["translations"] += 1
-        gemini_circuit.record_success()
-        logger.info(f"✅ Translated: {article['title'][:30]}")
-        
-        # Rate limiting delay
-        await asyncio.sleep(config.TRANSLATION_DELAY)
-        
-    except Exception as e:
-        gemini_circuit.record_failure()
-        logger.error(f"❌ Translation error: {e}")
-        
-        # Log failed prompt for debugging
-        logger.debug(f"Failed Prompt Context: {article['title']}")
-        
-        TRANSLATION_FAILURES[aid] = TRANSLATION_FAILURES.get(aid, 0) + 1
-        metrics.increment_error("translation_error")
-        
-        # Fallback logic
-        if TRANSLATION_FAILURES.get(aid, 0) >= 3:
-            logger.warning("⚠️ Translation failed 3 times, using English with disclaimer")
-            article["title_kh"] = "⚠️ ស្រាប់ភាសាអង់គ្លេស (Translation unavailable) - " + article["title"]
-            article["body_kh"] = article["summary"][:500]
-        else:
-            article["title_kh"] = article["title"]
-            article["body_kh"] = article["summary"][:500]
-            
-        # Re-raise RateLimitError to trigger backoff
-        if "429" in str(e) or "ResourceExhausted" in str(e):
-            raise RateLimitError("Gemini Rate Limit Exceeded") from e
-            
-    return article
-    
 # =========================== POSTING ===========================
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=3)
@@ -915,8 +803,27 @@ async def publish_worker():
                 if (await check_platform_rate_limit("gemini")) is None:
                     await asyncio.sleep(5)
                     continue
+                
+                # Check cache first
+                translations = {}
+                cached_km = await db.get_translation(article['article_id'], 'km')
+                
+                if cached_km:
+                    translations['km'] = cached_km
+                else:
+                    # Translate to Khmer (Primary)
+                    translations['km'] = await translator.translate_content(article, 'km')
                     
-                article = await translate(article)
+                    # Verify Quality
+                    if not await translator.verify_translation(article['summary'], translations['km']['summary']):
+                        logger.warning(f"⚠️ Translation Rejected (Quality): {article['title']}")
+                        metrics.increment_error("translation_rejected")
+                        await db.mark_pending_processed(row['id'])
+                        continue
+                        
+                    # Save to cache
+                    await db.save_translation(article['article_id'], 'km', translations['km'])
+
             except Exception as e:
                 logger.error(f"Translation failed in publisher: {e}")
                 await db.mark_pending_processed(row['id']) 
@@ -928,16 +835,33 @@ async def publish_worker():
             
             # Facebook
             if (await check_platform_rate_limit("facebook")) is not None:
-                await post_to_facebook(article, emoji)
+                content = await translator.get_content_for_platform(article, translations, 'facebook')
+                # We need to adapt post_to_facebook to accept pre-formatted content or handle the dict
+                # For now, let's assume we pass the dict but use the formatted content in the function
+                # Or better, update the article dict with the formatted content
+                article_fb = article.copy()
+                article_fb.update(translations['km']) # Use Khmer as base
+                article_fb['formatted_text'] = content
+                
+                await post_to_facebook(article_fb, emoji)
                 scheduler.record_post("facebook", category)
                 
             # Telegram
             if (await check_platform_rate_limit("telegram")) is not None:
-                await post_to_telegram(article, emoji, is_breaking)
+                content = await translator.get_content_for_platform(article, translations, 'telegram')
+                article_tg = article.copy()
+                article_tg.update(translations['km'])
+                article_tg['formatted_text'] = content
+                
+                await post_to_telegram(article_tg, emoji, is_breaking)
                 scheduler.record_post("telegram", category)
                 
             # X
-            await post_to_x(article, emoji)
+            content = await translator.get_content_for_platform(article, translations, 'x')
+            article_x = article.copy()
+            article_x['formatted_text'] = content
+            
+            await post_to_x(article_x, emoji)
             scheduler.record_post("x", category)
             
             # 5. Mark as Done
