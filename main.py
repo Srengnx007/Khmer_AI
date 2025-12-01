@@ -70,33 +70,64 @@ BOT_STATE = {
     "logs": deque(maxlen=50)
 }
 
-# FIX #10: Rate Limit Trackers using time.time() for consistency
-API_USAGE = {}
+# FIX #3: Async rate limiter with waiting (Thread-Safe)
+class RateLimiter:
+    def __init__(self):
+        self._locks = {}
+        self._usage = {}
+    
+    def _get_lock(self, platform):
+        if platform not in self._locks:
+            self._locks[platform] = asyncio.Lock()
+        return self._locks[platform]
 
-# FIX #3: Async rate limiter with waiting
-async def check_platform_rate_limit(platform: str) -> bool:
-    """Check if we can make a call to the platform, with waiting if needed"""
-    limit = config.RATE_LIMITS.get(platform)
-    if not limit: return True
-    
-    now = time.time()
-    # Clean old calls
-    if platform not in API_USAGE:
-        API_USAGE[platform] = []
-    API_USAGE[platform] = [t for t in API_USAGE[platform] if now - t < limit["period"]]
-    
-    if len(API_USAGE[platform]) >= limit["calls"]:
-        # Calculate wait time until oldest call expires
-        oldest_call = API_USAGE[platform][0]
-        wait_time = limit["period"] - (now - oldest_call) + 1
-        logger.warning(f"⚠️ Rate limit hit for {platform}, waiting {wait_time:.1f}s")
-        await asyncio.sleep(wait_time)
-        # Clean again after waiting
-        now = time.time()
-        API_USAGE[platform] = [t for t in API_USAGE[platform] if now - t < limit["period"]]
+    async def acquire(self, platform: str) -> int:
+        """
+        Check rate limit, wait if needed, and return tokens remaining.
+        Thread-safe using asyncio.Lock per platform.
+        """
+        limit = config.RATE_LIMITS.get(platform)
+        if not limit: return 999
         
-    API_USAGE[platform].append(time.time())
-    return True
+        lock = self._get_lock(platform)
+        
+        async with lock:
+            now = time.time()
+            # Initialize usage for platform
+            if platform not in self._usage:
+                self._usage[platform] = []
+            
+            # Sliding Window: Clean old calls
+            self._usage[platform] = [t for t in self._usage[platform] if now - t < limit["period"]]
+            
+            # Check limit
+            if len(self._usage[platform]) >= limit["calls"]:
+                # Calculate wait time
+                oldest_call = self._usage[platform][0]
+                wait_time = limit["period"] - (now - oldest_call) + 0.1 # Buffer
+                
+                logger.warning(f"⚠️ Rate limit hit for {platform}, waiting {wait_time:.1f}s")
+                
+                # Wait (releasing lock would be unsafe if we want to guarantee order, 
+                # but holding it blocks others. Here we hold to enforce strict FIFO and prevent race)
+                await asyncio.sleep(wait_time)
+                
+                # Re-check time after sleep
+                now = time.time()
+                self._usage[platform] = [t for t in self._usage[platform] if now - t < limit["period"]]
+            
+            # Record usage
+            self._usage[platform].append(now)
+            
+            # Return tokens remaining
+            return limit["calls"] - len(self._usage[platform])
+
+# Global Rate Limiter Instance
+limiter = RateLimiter()
+
+async def check_platform_rate_limit(platform: str) -> int:
+    """Wrapper for RateLimiter to maintain compatibility"""
+    return await limiter.acquire(platform)
 
 def is_similar_to_recent(title: str, recent_titles: list) -> bool:
     """Check if title is similar to any recent titles"""
@@ -687,7 +718,7 @@ async def worker():
                             is_breaking = True
                         
                         # Translate (Rate Limit Check inside not needed as it's 15/min and we are slow)
-                        if not await check_platform_rate_limit("gemini"):
+                        if (await check_platform_rate_limit("gemini")) is None:
                             logger.warning("Gemini Rate Limit Hit - Skipping")
                             continue
                             
@@ -695,11 +726,11 @@ async def worker():
                         
                         # Post to platforms with Rate Checks
                         fb_ok = False
-                        if await check_platform_rate_limit("facebook"):
+                        if (await check_platform_rate_limit("facebook")) is not None:
                             fb_ok = await post_to_facebook(article, emoji)
                             
                         tg_ok = False
-                        if await check_platform_rate_limit("telegram"):
+                        if (await check_platform_rate_limit("telegram")) is not None:
                             tg_ok = await post_to_telegram(article, emoji, is_breaking)
                             
                         x_ok = await post_to_x(article, emoji)
