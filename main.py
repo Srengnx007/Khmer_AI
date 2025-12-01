@@ -228,28 +228,77 @@ def get_image(entry, base_url: str):
     return None
 
 
+# Image Validation Cache (1 hour TTL)
+IMAGE_CACHE = {}
+
+@backoff.on_exception(backoff.expo, (aiohttp.ClientError, asyncio.TimeoutError), max_tries=3)
+async def _check_image_url(session, url):
+    """Helper to check image with HEAD fallback to GET"""
+    # 1. Try HEAD first (faster)
+    try:
+        async with session.head(url, allow_redirects=True, timeout=10) as resp:
+            if resp.status == 200:
+                ct = resp.headers.get('Content-Type', '').lower()
+                cl = int(resp.headers.get('Content-Length', 0))
+                
+                if cl > config.IMAGE_MAX_SIZE_MB * 1024 * 1024:
+                    logger.warning(f"⚠️ Image too large (HEAD): {url}")
+                    return False
+                    
+                if ct.startswith('image/'):
+                    return True
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        pass # Fallback to GET
+        
+    # 2. Fallback to GET (stream=True)
+    async with session.get(url, allow_redirects=True, timeout=10) as resp:
+        if resp.status != 200: return False
+        
+        # Check headers again
+        ct = resp.headers.get('Content-Type', '').lower()
+        cl = int(resp.headers.get('Content-Length', 0))
+        
+        if cl > config.IMAGE_MAX_SIZE_MB * 1024 * 1024:
+            return False
+            
+        if not ct.startswith('image/'):
+            return False
+            
+        # 3. Check actual bytes (Magic Numbers)
+        chunk = await resp.content.read(512)
+        if not chunk: return False
+        
+        return True
+
 async def validate_image(image_url: str) -> bool:
-    """Validate image URL is accessible and valid"""
-    if not image_url:
-        return False
+    """Validate image URL is accessible, valid type, and size"""
+    if not image_url: return False
     
+    # Check Cache
+    now = time.time()
+    if image_url in IMAGE_CACHE:
+        is_valid, ts = IMAGE_CACHE[image_url]
+        if now - ts < 3600: # 1 hour
+            return is_valid
+            
+    is_valid = False
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.head(image_url, timeout=5) as response:
-                # Check content type
-                content_type = response.headers.get('Content-Type', '')
-                if not content_type.startswith('image/'):
-                    return False
+            is_valid = await _check_image_url(session, image_url)
+    except Exception as e:
+        logger.warning(f"Image validation error for {image_url}: {e}")
+        
+    # Update Cache
+    IMAGE_CACHE[image_url] = (is_valid, now)
+    
+    # Cleanup Cache (Probabilistic)
+    if len(IMAGE_CACHE) > 500 and int(now) % 100 == 0:
+        keys = list(IMAGE_CACHE.keys())
+        for k in keys:
+            if now - IMAGE_CACHE[k][1] > 3600:
+                del IMAGE_CACHE[k]
                 
-                # Enhancement #13: Check size (max 5MB for Telegram)
-                content_length = int(response.headers.get('Content-Length', 0))
-                if content_length > config.IMAGE_MAX_SIZE_MB * 1024 * 1024:
-                    logger.warning(f"⚠️ Image too large: {content_length / (1024*1024):.1f}MB")
-                    return False
-                
-                return response.status == 200
-    except:
-        return False
+    return is_valid
 
 
 async def get_article_id(title: str, link: str):
