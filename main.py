@@ -586,7 +586,10 @@ async def post_to_x(article: dict, emoji: str):
         return True
         
     except Exception as e:
-        logger.error(f"X Post Failed: {e}")
+        logger.error(f"❌ X Post Failed: {e}")
+        # Enqueue for retry
+        aid = await get_article_id(article['title'], article['link'])
+        await db.add_failed_post(aid, "x", str(type(e).__name__), json.dumps(article))
         return False
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=3)
@@ -627,10 +630,11 @@ async def post_to_facebook(article: dict, emoji: str):
                     return True
                 else:
                     # Log response data for debugging
-                    if "error" in resp_data:
-                        logger.error(f"❌ FB Error: {resp_data['error'].get('message', 'Unknown')}")
-                    else:
-                        logger.error(f"❌ FB Failed: Status {resp.status}, Data: {resp_data}")
+                    error_msg = resp_data.get('error', {}).get('message', 'Unknown')
+                    logger.error(f"❌ FB Photo Failed: Status {resp.status}, Error: {error_msg}, Data: {resp_data}")
+                    # Enqueue for retry
+                    aid = await get_article_id(article['title'], article['link'])
+                    await db.add_failed_post(aid, "facebook", f"FBPhotoError: {error_msg}", json.dumps(article))
         
         # Fallback to link post
         url = f"https://graph.facebook.com/{api_ver}/{config.FB_PAGE_ID}/feed"
@@ -650,10 +654,11 @@ async def post_to_facebook(article: dict, emoji: str):
                 return True
             else:
                 # Log response data for debugging
-                if "error" in resp_data:
-                    logger.error(f"❌ FB Error: {resp_data['error'].get('message', 'Unknown')}")
-                else:
-                    logger.error(f"❌ FB Failed: Status {resp.status}, Data: {resp_data}")
+                error_msg = resp_data.get('error', {}).get('message', 'Unknown')
+                logger.error(f"❌ FB Link Failed: Status {resp.status}, Error: {error_msg}, Data: {resp_data}")
+                # Enqueue for retry
+                aid = await get_article_id(article['title'], article['link'])
+                await db.add_failed_post(aid, "facebook", f"FBLinkError: {error_msg}", json.dumps(article))
     
     return False
 
@@ -702,7 +707,6 @@ async def post_to_telegram(article: dict, emoji: str, is_breaking: bool = False)
                     parse_mode=ParseMode.HTML,
                     reply_markup=buttons
                 )
-                BOT_STATE["tg_posts"] += 1
                 logger.info(f"✅ TG Photo Posted: {msg.message_id}")
             except Exception as e:
                 # FIX #5: Track image failures
@@ -716,14 +720,22 @@ async def post_to_telegram(article: dict, emoji: str, is_breaking: bool = False)
     
     # Fallback to text
     if not msg:
-        msg = await telegram_bot.send_message(
-            chat_id=config.TELEGRAM_CHANNEL_ID,
-            text=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=buttons,
-            disable_web_page_preview=False
-        )
-    
+        try:
+            msg = await telegram_bot.send_message(
+                chat_id=config.TELEGRAM_CHANNEL_ID,
+                text=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=buttons,
+                disable_web_page_preview=False
+            )
+            logger.info(f"✅ TG Text Posted: {msg.message_id}")
+        except Exception as e:
+            logger.error(f"❌ TG Post Failed: {e}")
+            # Enqueue for retry
+            aid = await get_article_id(article['title'], article['link'])
+            await db.add_failed_post(aid, "telegram", str(type(e).__name__), json.dumps(article))
+            return False
+            
     if msg:
         BOT_STATE["tg_posts"] += 1
         
@@ -741,6 +753,58 @@ async def post_to_telegram(article: dict, emoji: str, is_breaking: bool = False)
         return True
     
     return False
+
+# =========================== RETRY WORKER ===========================
+
+async def retry_worker():
+    """Background task to process retry queue"""
+    logger.info("🔄 Retry Worker Started")
+    while True:
+        try:
+            await asyncio.sleep(300) # Check every 5 minutes
+            
+            pending = await db.get_pending_retries()
+            if not pending: continue
+            
+            logger.info(f"🔄 Processing {len(pending)} retries...")
+            
+            for row in pending:
+                id = row["id"]
+                platform = row["platform"]
+                retry_count = row["retry_count"]
+                article = json.loads(row["article_data"])
+                
+                # Max retries (5)
+                if retry_count >= 5:
+                    logger.warning(f"💀 Dead Letter: {article['title'][:30]} ({platform})")
+                    await db.update_retry_status(id, "DEAD")
+                    continue
+                
+                logger.info(f"🔄 Retrying {platform} ({retry_count+1}/5): {article['title'][:30]}")
+                
+                success = False
+                try:
+                    if platform == "x":
+                        success = await post_to_x(article, "🔄")
+                    elif platform == "facebook":
+                        success = await post_to_facebook(article, "🔄")
+                    elif platform == "telegram":
+                        success = await post_to_telegram(article, "🔄", False)
+                except Exception as e:
+                    logger.error(f"Retry failed: {e}")
+                
+                if success:
+                    await db.update_retry_status(id, "SUCCESS")
+                    logger.info(f"✅ Retry Successful: {article['title'][:30]}")
+                else:
+                    # Exponential Backoff: 1m, 5m, 15m, 1h, 6h
+                    delays = [1, 5, 15, 60, 360]
+                    delay = delays[min(retry_count, 4)]
+                    await db.update_retry_status(id, "PENDING", retry_count + 1, delay)
+                    
+        except Exception as e:
+            logger.error(f"❌ Retry Worker Error: {e}")
+            await asyncio.sleep(60)
 
 # FIX #2: Cleanup scheduler - runs every 24 hours
 async def cleanup_scheduler():
@@ -1042,7 +1106,8 @@ async def main():
     await asyncio.gather(
         web_server(),
         worker(),
-        cleanup_scheduler()  # FIX #2: Add cleanup scheduler
+        cleanup_scheduler(),  # FIX #2: Add cleanup scheduler
+        retry_worker()        # Retry System
     )
 
 if __name__ == "__main__":
