@@ -885,6 +885,12 @@ async def worker():
                         
                         if await db.is_posted(aid): continue
                         
+                        # Quality Check
+                        q_score, q_reasons = scorer.score_article(article)
+                        if q_score < 60:
+                            logger.info(f"📉 Low Quality ({q_score}): {e.title[:30]}... Reasons: {', '.join(q_reasons)}")
+                            continue
+                            
                         # Duplicate Check
                         is_dup, match_title, score = detector.is_duplicate(e.title, recent_titles)
                         if is_dup:
