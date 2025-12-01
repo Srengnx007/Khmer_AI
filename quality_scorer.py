@@ -1,15 +1,13 @@
 import logging
 import asyncio
+import json
 from datetime import datetime
+import google.generativeai as genai
+from config import GEMINI_API_KEY, GEMINI_MODEL
 
-# Try importing Transformers
-try:
-    from transformers import pipeline
-    AI_SCORER_AVAILABLE = True
-    # Load zero-shot classifier (lightweight)
-    classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device=-1) # CPU
-except ImportError:
-    AI_SCORER_AVAILABLE = False
+# Configure Gemini
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel(GEMINI_MODEL)
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +18,7 @@ class QualityScorer:
             "summary": 20,
             "image": 10,
             "source": 15,
-            "ai_score": 30, # New AI component
+            "ai_score": 30,  # AI component using Gemini
             "language": 10
         }
         
@@ -36,9 +34,60 @@ class QualityScorer:
             "BBC News": 1.3
         }
 
+    async def _gemini_classify(self, text: str) -> str:
+        """
+        Use Gemini to classify news text into quality categories.
+        Returns: 'High Quality News', 'Clickbait', 'Spam', or 'Sensitive'
+        """
+        prompt = f"""Classify the following news article text into exactly ONE of these categories:
+- High Quality News (factual, informative, well-written journalism)
+- Clickbait (sensationalized, misleading headlines designed to get clicks)
+- Spam (promotional content, advertisements, irrelevant content)
+- Sensitive (adult content, offensive material, inappropriate topics)
+
+News Text:
+{text[:1000]}
+
+Respond with a JSON object containing a single key "classification" with the category name.
+Example: {{"classification": "High Quality News"}}"""
+
+        try:
+            response = await asyncio.to_thread(
+                model.generate_content,
+                prompt,
+                generation_config={"response_mime_type": "application/json"}
+            )
+            
+            # Clean response text (strip Markdown if present)
+            text = response.text.strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            elif text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+            
+            parsed = json.loads(text)
+            classification = parsed.get("classification", "High Quality News")
+            
+            # Validate response
+            valid_labels = ['High Quality News', 'Clickbait', 'Spam', 'Sensitive']
+            for label in valid_labels:
+                if label.lower() in classification.lower():
+                    return label
+            
+            # Fallback if unclear
+            logger.warning(f"Gemini returned unclear classification: {classification}")
+            return "High Quality News"  # Neutral fallback
+            
+        except Exception as e:
+            logger.error(f"Gemini classification failed: {e}")
+            return "High Quality News"  # Neutral fallback on error
+
     async def score_article(self, article: dict) -> tuple:
         """
-        Score article quality from 0-100.
+        Score article quality from 0-100 using Gemini AI classification.
         Returns: (score, reason_list)
         """
         score = 0
@@ -48,14 +97,20 @@ class QualityScorer:
         title = article.get("title", "")
         summary = article.get("summary", "")
         
-        if len(title) < 20: reasons.append("Title too short")
-        else: score += self.weights["title"]
+        if len(title) < 20:
+            reasons.append("Title too short")
+        else:
+            score += self.weights["title"]
         
-        if len(summary) < 100: reasons.append("Summary too short")
-        else: score += self.weights["summary"]
+        if len(summary) < 100:
+            reasons.append("Summary too short")
+        else:
+            score += self.weights["summary"]
         
-        if article.get("image_url"): score += self.weights["image"]
-        else: reasons.append("No image")
+        if article.get("image_url"):
+            score += self.weights["image"]
+        else:
+            reasons.append("No image")
         
         # Source Weight
         source = article.get("source", "Unknown")
@@ -72,30 +127,28 @@ class QualityScorer:
         else:
             score += self.weights["language"]
             
-        # 3. AI Scoring (Zero-Shot)
+        # 3. Gemini AI Scoring (Zero-Shot Classification)
         ai_score = 0
-        if AI_SCORER_AVAILABLE:
-            try:
-                # Classify into categories
-                labels = ["news", "spam", "clickbait", "sensitive"]
-                result = await asyncio.to_thread(classifier, title + ". " + summary, labels)
+        try:
+            classification = await self._gemini_classify(title + ". " + summary)
+            
+            if classification == "High Quality News":
+                ai_score = 30
+                logger.debug(f"✅ Gemini: High Quality - {title[:30]}...")
+            elif classification == "Clickbait":
+                ai_score = 0
+                reasons.append("AI detected clickbait")
+                logger.debug(f"⚠️ Gemini: Clickbait - {title[:30]}...")
+            elif classification in ["Spam", "Sensitive"]:
+                # Reject immediately
+                logger.warning(f"❌ Gemini: {classification} - {title[:30]}...")
+                return 0, [f"AI detected {classification.lower()}"]
+            else:
+                ai_score = 15  # Neutral fallback
                 
-                # result['labels'] and result['scores'] are sorted
-                top_label = result['labels'][0]
-                top_score = result['scores'][0]
-                
-                if top_label == "news" and top_score > 0.6:
-                    ai_score = 30
-                elif top_label in ["spam", "clickbait", "sensitive"]:
-                    ai_score = 0
-                    reasons.append(f"AI detected {top_label} ({top_score:.2f})")
-                else:
-                    ai_score = 15 # Neutral
-            except Exception as e:
-                logger.error(f"AI Scorer failed: {e}")
-                ai_score = 15 # Fallback
-        else:
-            ai_score = 30 # Assume good if no AI available to prove otherwise
+        except Exception as e:
+            logger.error(f"Gemini scoring failed: {e}")
+            ai_score = 15  # Neutral fallback on error
             
         score += ai_score
         

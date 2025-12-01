@@ -81,8 +81,18 @@ class TranslationManager:
                 generation_config={"response_mime_type": "application/json"}
             )
             
+            # Clean response text (strip Markdown if present)
+            text = response.text.strip()
+            if text.startswith("```json"):
+                text = text[7:]
+            elif text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+            
             # Parse JSON response
-            parsed = json.loads(response.text)
+            parsed = json.loads(text)
             
             # Handle both dict and list responses
             if isinstance(parsed, list):
@@ -123,26 +133,33 @@ class TranslationManager:
         return f"""
         Translate this news article to {lang_name}.
         
+        IMPORTANT: Return ONLY a raw JSON string. Do NOT use Markdown formatting (no ```json blocks).
+        
         Input:
         Title: {article['title']}
         Summary: {article['summary']}
         
-        Output JSON:
+        Output JSON Schema:
         {{
             "title": "Translated Headline",
             "body": "Translated Full Summary",
-            "summary": "Short social media blurb (1-2 sentences)"
+            "summary": "Short summary",
+            "social_blurb": "Engaging social media caption (1-2 sentences) with emojis"
         }}
         """
 
     async def _fallback_translate(self, article: dict, target_lang: str) -> dict:
-        try:
+        def perform_translation():
             translator = GoogleTranslator(source='auto', target=target_lang)
             return {
                 "title": translator.translate(article['title']),
                 "body": translator.translate(article['summary']),
-                "summary": translator.translate(article['summary'])
+                "summary": translator.translate(article['summary']),
+                "social_blurb": translator.translate(article['summary'])
             }
+
+        try:
+            return await asyncio.to_thread(perform_translation)
         except Exception as e:
             logger.error(f"Fallback Translation Failed: {e}")
             # Return original if all else fails

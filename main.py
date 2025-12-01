@@ -280,7 +280,12 @@ async def fetch_worker():
     while True:
         try:
             BOT_STATE["status"] = "Fetching"
-            await asyncio.gather(*(fetch_rss_feed(src) for src in config.RSS_FEEDS))
+            
+            # Fetch sequentially to avoid rate limits
+            for src in config.RSS_FEEDS:
+                await fetch_rss_feed(src)
+                await asyncio.sleep(1) # 1s delay between feeds
+                
             BOT_STATE["last_run"] = datetime.now().strftime("%H:%M:%S")
             BOT_STATE["status"] = "Idle"
             
@@ -442,6 +447,9 @@ async def publish_worker():
                 await db.mark_pending_processed(row['id'])
                 await db.add_failed_post(article['article_id'], "telegram", "SendFailed", json.dumps(article))
                 logger.warning(f"⚠️ Telegram failed, added to retry: {article['title'][:30]}...")
+            
+            # Always wait between posts to prevent bursts
+            await asyncio.sleep(config.POST_DELAY_NORMAL)
             
         except Exception as e:
             logger.error(f"Publish Worker Error: {e}")

@@ -63,7 +63,7 @@ BURST_MODE_DEFAULT = False
 RATE_LIMITS = {
     "telegram": {"calls": 20, "period": 60},     # 20/min (Safe)
     "facebook": {"calls": 10, "period": 3600},   # 10/hr (Very Safe)
-    "x":        {"calls": 15, "period": 900},    # 15/15min (Free Tier)
+    "x":        {"calls": 10, "period": 900},    # 10/15min (Safer Free Tier)
     "gemini":   {"calls": 15, "period": 60},     # 15/min
     "rss":      {"calls": 100, "period": 60}     # Internal fetch limit
 }
@@ -71,16 +71,16 @@ RATE_LIMITS = {
 # =========================== NEWS SOURCES ===========================
 NEWS_SOURCES = {
     "cambodia": [
-        {"name": "Thmey Thmey",    "rss": "https://thmeythmey.com/rss",                   "url": "https://thmeythmey.com"},
+        # {"name": "Thmey Thmey",    "rss": "https://thmeythmey.com/rss",                   "url": "https://thmeythmey.com"}, # 404
         {"name": "Koh Santepheap", "rss": "https://kohsantepheapdaily.com.kh/feed",        "url": "https://kohsantepheapdaily.com.kh"},
-        {"name": "DAP News",       "rss": "https://www.dap-news.com/feed",                 "url": "https://www.dap-news.com"},
+        # {"name": "DAP News",       "rss": "https://www.dap-news.com/feed",                 "url": "https://www.dap-news.com"}, # 301
         {"name": "Khmer Times",    "rss": "https://www.khmertimeskh.com/feed/",            "url": "https://www.khmertimeskh.com"},
         {"name": "Rasmei News",    "rss": "https://www.rasmeinews.com/feed",               "url": "https://www.rasmeinews.com"},
         {"name": "CamboJA News",   "rss": "https://cambojanews.com/feed/",                 "url": "https://cambojanews.com"},
-        {"name": "Post Khmer",     "rss": "https://postkhmer.com/feed",                    "url": "https://postkhmer.com"},
-        {"name": "Sabay News",     "rss": "https://news.sabay.com.kh/topics/cambodia.rss", "url": "https://news.sabay.com.kh"},
+        # {"name": "Post Khmer",     "rss": "https://postkhmer.com/feed",                    "url": "https://postkhmer.com"}, # 301
+        # {"name": "Sabay News",     "rss": "https://news.sabay.com.kh/topics/cambodia.rss", "url": "https://news.sabay.com.kh"}, # 404
         {"name": "Kiripost",       "rss": "https://kiripost.com/feed",                     "url": "https://kiripost.com"},
-        {"name": "Cambodianess",   "rss": "https://cambodianess.com/rss.xml",              "url": "https://cambodianess.com"},
+        # {"name": "Cambodianess",   "rss": "https://cambodianess.com/rss.xml",              "url": "https://cambodianess.com"}, # 404
         {"name": "AMS Central",    "rss": "https://ams.com.kh/central/feed/",              "url": "https://ams.com.kh/central"},
     ],
     "international": [
@@ -93,16 +93,16 @@ NEWS_SOURCES = {
         {"name": "CNA",            "rss": "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml", "url": "https://www.channelnewsasia.com"},
     ],
     "thai": [
-        {"name": "Bangkok Post",   "rss": "https://www.bangkokpost.com/rss/feed/news",       "url": "https://www.bangkokpost.com"},
-        {"name": "Khaosod English","rss": "https://www.khaosodenglish.com/feed",             "url": "https://www.khaosodenglish.com"},
+        # {"name": "Bangkok Post",   "rss": "https://www.bangkokpost.com/rss/feed/news",       "url": "https://www.bangkokpost.com"}, # 429
+        # {"name": "Khaosod English","rss": "https://www.khaosodenglish.com/feed",             "url": "https://www.khaosodenglish.com"}, # 403
     ],
     "vietnamese": [
         {"name": "VN Express",     "rss": "https://e.vnexpress.net/rss/news.rss",            "url": "https://e.vnexpress.net"},
         {"name": "Tuoi Tre",       "rss": "https://tuoitrenews.vn/rss",                      "url": "https://tuoitrenews.vn"},
-        {"name": "VietnamNet",     "rss": "https://vietnamnet.vn/rss/english.rss",           "url": "https://vietnamnet.vn/en"},
+        # {"name": "VietnamNet",     "rss": "https://vietnamnet.vn/rss/english.rss",           "url": "https://vietnamnet.vn/en"}, # 404
     ],
     "china": [
-        {"name": "CGTN",           "rss": "https://www.cgtn.com/rss.xml",                    "url": "https://www.cgtn.com"},
+        # {"name": "CGTN",           "rss": "https://www.cgtn.com/rss.xml",                    "url": "https://www.cgtn.com"}, # 404
         {"name": "China Daily",    "rss": "https://www.chinadaily.com.cn/rss/world_rss.xml", "url": "https://www.chinadaily.com.cn"},
         {"name": "SCMP",           "rss": "https://www.scmp.com/rss/91/feed",                "url": "https://www.scmp.com"},
     ],

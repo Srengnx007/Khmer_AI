@@ -17,7 +17,7 @@ class SmartScheduler:
         self.OFF_HOURS = {2, 3, 4, 5}
         
         # Spacing Rules (seconds)
-        self.MIN_PLATFORM_DELAY = 300 # 5 mins
+        self.MIN_PLATFORM_DELAY = 600 # 10 mins
         self.MIN_CATEGORY_DELAY = 1800 # 30 mins
         self.BURST_DELAY = 60 # 1 min
         

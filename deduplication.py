@@ -30,15 +30,27 @@ class DuplicateDetector:
         }
 
     def normalize_khmer(self, text: str) -> str:
-        """Normalize Khmer text (NFD -> NFC, remove zero-width spaces)"""
+        """Normalize Khmer text (NFD -> NFC, remove zero-width spaces, punctuation)"""
         if not text: return ""
+        
+        # 1. Unicode Normalization
         text = unicodedata.normalize('NFC', text)
+        
+        # 2. Remove Zero-Width Spaces and other invisible chars
         text = text.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '')
-        text = re.sub(r'[។៕៖ៗ,.\?!\'"]', ' ', text)
+        
+        # 3. Remove Punctuation (Khmer + English)
+        # Khmer: ។ ៕ ៖ ៗ
+        # English: . , ? ! " '
+        text = re.sub(r'[។៕៖ៗ,.\?!\'"\-:;]', ' ', text)
+        
+        # 4. Collapse multiple spaces
+        text = re.sub(r'\s+', ' ', text)
+        
         return text.strip().lower()
 
     def tokenize(self, text: str) -> list:
-        """Smart Tokenizer: Uses khmer-nltk if available, else char n-grams"""
+        """Smart Tokenizer: Uses khmer-nltk if available, else whitespace + n-grams"""
         text = self.normalize_khmer(text)
         
         if KHMER_NLP_AVAILABLE:
@@ -48,22 +60,21 @@ class DuplicateDetector:
             except Exception:
                 pass # Fallback
         
-        # Fallback: Character Trigrams & Quadgrams
+        # Fallback: Whitespace Split + Trigrams
+        # This ensures "Hello World." and "Hello World" match perfectly after normalization
         tokens = []
-        words = text.split() # Split by existing spaces first
+        words = text.split() 
         
         for word in words:
             if word in self.stopwords: continue
-            if len(word) < 3: 
-                tokens.append(word)
-                continue
             
-            # Add full word
+            # Add full word (essential for exact matching)
             tokens.append(word)
             
-            # Trigrams
-            for i in range(len(word) - 2):
-                tokens.append(word[i:i+3])
+            # Add Trigrams for fuzzy matching (if word is long enough)
+            if len(word) >= 3:
+                for i in range(len(word) - 2):
+                    tokens.append(word[i:i+3])
                 
         return tokens
 
