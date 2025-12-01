@@ -11,6 +11,7 @@
 # - Enhancement #15: Translation fallback to English
 from quality_scorer import scorer
 from image_processor import image_processor
+from metrics import metrics
 import logger_config
 
 # Configure Logger
@@ -480,7 +481,7 @@ async def translate(article: dict):
         logger.debug(f"Failed Prompt Context: {article['title']}")
         
         TRANSLATION_FAILURES[aid] = TRANSLATION_FAILURES.get(aid, 0) + 1
-        BOT_STATE["errors"] += 1
+        metrics.increment_error("translation_error")
         
         # Fallback logic
         if TRANSLATION_FAILURES.get(aid, 0) >= 3:
@@ -519,12 +520,14 @@ async def post_to_x(article: dict, emoji: str):
         text = f"{emoji} {title}\n{link}"
         
         await asyncio.to_thread(twitter_client.create_tweet, text=text)
-        BOT_STATE["x_posts"] += 1
-        logger.info(f"✅ X Posted: {title[:30]}...")
+        metrics.increment_post("x", "success")
+        logger.info(f"✅ X Posted: {title[:30]}...", correlation_id=logger_config.correlation_id.get())
         return True
         
     except Exception as e:
         logger.error(f"❌ X Post Failed: {e}")
+        metrics.increment_post("x", "failed")
+        metrics.increment_error("x_post_error")
         # Enqueue for retry
         aid = await get_article_id(article['title'], article['link'])
         await db.add_failed_post(aid, "x", str(type(e).__name__), json.dumps(article))
@@ -675,7 +678,7 @@ async def post_to_telegram(article: dict, emoji: str, is_breaking: bool = False)
             return False
             
     if msg:
-        BOT_STATE["tg_posts"] += 1
+        metrics.increment_post("telegram", "success")
         
         # Pin if breaking news
         if is_breaking:
@@ -1033,6 +1036,10 @@ async def metrics(request):
     """Metrics endpoint"""
     return web.json_response(BOT_STATE)
 
+async def handle_metrics(request):
+    data, content_type = metrics.get_metrics_data()
+    return web.Response(body=data, content_type=content_type)
+
 async def web_server():
     """Start web server"""
     app = web.Application()
@@ -1040,7 +1047,7 @@ async def web_server():
     app.router.add_post("/trigger", trigger_check)
     app.router.add_get("/ping", ping)
     app.router.add_get("/health", health_check)
-    app.router.add_get("/metrics", metrics)
+    app.router.add_get("/metrics", handle_metrics) # Changed to handle_metrics
     
     runner = web.AppRunner(app)
     await runner.setup()
