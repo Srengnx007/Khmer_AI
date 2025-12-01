@@ -63,8 +63,8 @@ BURST_MODE_DEFAULT = False
 RATE_LIMITS = {
     "telegram": {"calls": 20, "period": 60},     # 20/min (Safe)
     "facebook": {"calls": 10, "period": 3600},   # 10/hr (Very Safe)
-    "x":        {"calls": 10, "period": 900},    # 10/15min (Safer Free Tier)
-    "gemini":   {"calls": 15, "period": 60},     # 15/min
+    "x":        {"calls": 5, "period": 1200},    # 5/20min (Extremely Safe for Penalty Box)
+    "gemini":   {"calls": 10, "period": 60},     # 10/min (Safety Buffer)
     "rss":      {"calls": 100, "period": 60}     # Internal fetch limit
 }
 

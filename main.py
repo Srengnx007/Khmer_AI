@@ -232,6 +232,7 @@ async def process_entry(entry, src):
     elif hasattr(entry, "media_thumbnail"): image_url = entry.media_thumbnail[0]["url"]
     
     # 2. Quality Score
+    # 2. Quality Score
     article_temp = {
         "title": entry.title,
         "summary": summary,
@@ -239,6 +240,8 @@ async def process_entry(entry, src):
         "source": src["name"]
     }
     
+    # Rate limit Gemini call
+    await limiter.acquire("gemini")
     q_score, reasons = await scorer.score_article(article_temp)
     if q_score < 50:
         logger.info(f"📉 Low Quality ({q_score}): {entry.title[:20]}")
@@ -315,7 +318,7 @@ async def retry_failed_posts():
             
             if not pending:
                 # No retries pending, wait before checking again
-                await asyncio.sleep(300)  # Check every 5 minutes
+                await asyncio.sleep(600)  # Check every 10 minutes
                 continue
             
             logger.debug(f"🔄 Processing {len(pending)} pending retries")
@@ -380,19 +383,20 @@ async def retry_failed_posts():
                         logger.warning(f"⚠️ Retry failed, will retry in {delay_minutes}m: {article_id} ({platform})")
                     
                     # Space out retries to avoid overwhelming APIs
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(30)
                     
                 except Exception as e:
                     logger.error(f"❌ Error processing retry {row.get('id')}: {e}", exc_info=True)
-                    # Don't crash the entire worker on one bad retry
-                    continue
+                
+                # Always wait 30s between retries to prevent storms
+                await asyncio.sleep(30)
             
         except Exception as e:
             logger.error(f"❌ Retry queue worker error: {e}", exc_info=True)
             await asyncio.sleep(60)  # Wait before retrying the worker itself
         
         # Wait before next cycle
-        await asyncio.sleep(300)  # Check every 5 minutes
+        await asyncio.sleep(600)  # Check every 10 minutes
 
 
 async def publish_worker():
@@ -419,6 +423,9 @@ async def publish_worker():
             translations = {}
             # Parallel translation for all target langs
             langs = ['km', 'th', 'vi', 'zh-CN'] # Configurable
+            
+            # Rate limit Gemini call (batch)
+            await limiter.acquire("gemini")
             tasks = [translator.translate_content(article, lang) for lang in langs]
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
