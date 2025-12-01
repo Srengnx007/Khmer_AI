@@ -26,7 +26,6 @@ import feedparser
 import backoff
 import tweepy
 import difflib
-from collections import defaultdict
 from bs4 import BeautifulSoup
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
@@ -65,12 +64,14 @@ BOT_STATE = {
     "cache_hits": 0,
     "duplicate_skips": 0,
     "image_failures": 0,
-    "sources_health": defaultdict(lambda: {'success': 0, 'fail': 0}),
+    "duplicate_skips": 0,
+    "image_failures": 0,
+    "sources_health": {},
     "logs": deque(maxlen=50)
 }
 
 # FIX #10: Rate Limit Trackers using time.time() for consistency
-API_USAGE = defaultdict(list)
+API_USAGE = {}
 
 # FIX #3: Async rate limiter with waiting
 async def check_platform_rate_limit(platform: str) -> bool:
@@ -80,6 +81,8 @@ async def check_platform_rate_limit(platform: str) -> bool:
     
     now = time.time()
     # Clean old calls
+    if platform not in API_USAGE:
+        API_USAGE[platform] = []
     API_USAGE[platform] = [t for t in API_USAGE[platform] if now - t < limit["period"]]
     
     if len(API_USAGE[platform]) >= limit["calls"]:
@@ -154,25 +157,7 @@ trigger_event = asyncio.Event()
 boost_until = None
 
 # Rate limiting
-gemini_calls = deque(maxlen=60)
-
-# =========================== RATE LIMITER ===========================
-
-async def check_rate_limit():
-    """Ensure we don't exceed Gemini rate limits (15/min)"""
-    now = time.time()
-    
-    # Remove calls older than 1 minute
-    while gemini_calls and now - gemini_calls[0] > 60:
-        gemini_calls.popleft()
-    
-    # If at limit, wait
-    if len(gemini_calls) >= 15:
-        wait_time = 60 - (now - gemini_calls[0]) + 1
-        logger.warning(f"⏳ Rate limit reached, waiting {wait_time:.1f}s")
-        await asyncio.sleep(wait_time)
-    
-    gemini_calls.append(now)
+# gemini_calls removed (handled by generic rate limiter)
 
 # =========================== ERROR REPORTING ===========================
 
@@ -277,7 +262,8 @@ async def get_article_id(title: str, link: str):
 # =========================== TRANSLATION ===========================
 
 # Translation failure tracking
-TRANSLATION_FAILURES = defaultdict(int)
+# Translation failure tracking
+TRANSLATION_FAILURES = {}
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=3)
 async def translate(article: dict):
@@ -293,8 +279,7 @@ async def translate(article: dict):
         logger.debug(f"✅ Cache hit for: {article['title'][:30]}")
         return article
     
-    # Check rate limit before calling API
-    await check_rate_limit()
+    # Rate limit check handled in worker
     
     prompt = f"""Translate to natural, engaging Khmer for Telegram news:
 
@@ -343,15 +328,15 @@ Return ONLY valid JSON with no markdown:
         article["title_kh"] = article["title"]
         article["body_kh"] = article["summary"][:500]
         BOT_STATE["errors"] += 1
-        TRANSLATION_FAILURES[aid] += 1
+        TRANSLATION_FAILURES[aid] = TRANSLATION_FAILURES.get(aid, 0) + 1
         
     except Exception as e:
         logger.error(f"❌ Translation error: {e}")
-        TRANSLATION_FAILURES[aid] += 1
+        TRANSLATION_FAILURES[aid] = TRANSLATION_FAILURES.get(aid, 0) + 1
         BOT_STATE["errors"] += 1
         
         # Enhancement #15: Translation fallback after 3 failures
-        if TRANSLATION_FAILURES[aid] >= 3:
+        if TRANSLATION_FAILURES.get(aid, 0) >= 3:
             logger.warning("⚠️ Translation failed 3 times, using English with disclaimer")
             article["title_kh"] = "⚠️ ស្រាប់ភាសាអង់គ្លេស (Translation unavailable) - " + article["title"]
             article["body_kh"] = article["summary"][:500]
@@ -615,6 +600,11 @@ async def worker():
                     if posted_count >= max_posts: break
                     try:
                         feed = await fetch_rss(src["rss"])
+                        
+                        # Initialize health stats if missing
+                        if src["name"] not in BOT_STATE["sources_health"]:
+                            BOT_STATE["sources_health"][src["name"]] = {'success': 0, 'fail': 0}
+                            
                         if not feed or not feed.entries: 
                             BOT_STATE["sources_health"][src["name"]]["fail"] += 1
                             continue
@@ -684,6 +674,8 @@ async def worker():
                     except Exception as e:
                         logger.error(f"❌ Error processing {src['name']}: {e}")
                         BOT_STATE["errors"] += 1
+                        if src["name"] not in BOT_STATE["sources_health"]:
+                            BOT_STATE["sources_health"][src["name"]] = {'success': 0, 'fail': 0}
                         BOT_STATE["sources_health"][src["name"]]["fail"] += 1
             
             # Calculate next run
