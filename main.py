@@ -1,3 +1,4 @@
+
 # CHANGES:
 # - FIX #1: Removed duplicate BOT_STATE keys (tg_posts, errors)
 # - FIX #3: Made rate limiter async with actual waiting
@@ -129,13 +130,6 @@ async def check_platform_rate_limit(platform: str) -> int:
     """Wrapper for RateLimiter to maintain compatibility"""
     return await limiter.acquire(platform)
 
-def is_similar_to_recent(title: str, recent_titles: list) -> bool:
-    """Check if title is similar to any recent titles"""
-    for recent in recent_titles:
-        ratio = difflib.SequenceMatcher(None, title, recent).ratio()
-        if ratio > config.SIMILARITY_THRESHOLD:  # Using constant from config
-            return True
-    return False
 
 class DashboardHandler(logging.Handler):
     def emit(self, record):
@@ -892,8 +886,9 @@ async def worker():
                         if await db.is_posted(aid): continue
                         
                         # Duplicate Check
-                        if is_similar_to_recent(e.title, recent_titles):
-                            logger.info(f"⏭️ Skipped Duplicate: {e.title[:30]}...")
+                        is_dup, match_title, score = detector.is_duplicate(e.title, recent_titles)
+                        if is_dup:
+                            logger.info(f"⏭️ Skipped Duplicate ({score:.2f}): {e.title[:30]}... == {match_title[:30]}...")
                             BOT_STATE["duplicate_skips"] += 1
                             await db.mark_as_posted(aid, e.title, cat, src["name"]) # Mark to skip future checks
                             continue
