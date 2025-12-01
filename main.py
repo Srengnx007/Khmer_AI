@@ -215,20 +215,86 @@ async def send_error_report(subject: str, message: str, extra_context: dict = No
 
 # =========================== FETCHING ===========================
 
-@backoff.on_exception(backoff.expo, (aiohttp.ClientError, asyncio.TimeoutError), max_tries=3)
+# RSS Feed Cache (ETag / Last-Modified)
+FEED_CACHE = {}
+
 async def fetch_rss(url: str):
-    """Fetch RSS feed with retry"""
-    headers = {"User-Agent": "KhmerNewsBot/2.0 (+https://t.me/AIDailyNewsKH)"}
+    """
+    Robust RSS fetcher with:
+    - Auto-detect charset
+    - Compression support (gzip/brotli)
+    - Progressive timeout (15s -> 30s)
+    - ETag/Last-Modified caching
+    - Validation
+    """
+    etag = None
+    last_modified = None
     
-    async with aiohttp.ClientSession(
-        headers=headers, 
-        timeout=aiohttp.ClientTimeout(total=25)
-    ) as session:
-        async with session.get(url) as response:
-            if response.status == 200:
-                return feedparser.parse(await response.text())
+    if url in FEED_CACHE:
+        etag, last_modified = FEED_CACHE[url]
+        
+    headers = {
+        "User-Agent": "KhmerNewsBot/2.0 (+https://t.me/AIDailyNewsKH)",
+        "Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br"
+    }
     
-    return None
+    if etag: headers["If-None-Match"] = etag
+    if last_modified: headers["If-Modified-Since"] = last_modified
+    
+    # Progressive Timeout Strategy
+    timeouts = [15, 30]
+    
+    for attempt, timeout in enumerate(timeouts):
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
+                async with session.get(url, headers=headers) as response:
+                    
+                    # Handle 304 Not Modified
+                    if response.status == 304:
+                        logger.debug(f"📉 Feed Not Modified: {url}")
+                        # Return empty feed object with status 304
+                        return feedparser.FeedParserDict(entries=[], status=304)
+                        
+                    if response.status == 200:
+                        # Read content (auto-decompress)
+                        content = await response.read()
+                        
+                        # Parse
+                        feed = feedparser.parse(content)
+                        feed.status = 200
+                        
+                        # Validate
+                        if feed.bozo:
+                            logger.warning(f"⚠️ Feed Parse Warning (Bozo): {feed.bozo_exception} - {url}")
+                            # Continue if we have entries despite errors
+                            if not feed.entries:
+                                return None
+                                
+                        if not feed.entries and not feed.feed:
+                             logger.warning(f"⚠️ Empty/Invalid Feed: {url}")
+                             return None
+                             
+                        # Update Cache
+                        new_etag = response.headers.get("ETag")
+                        new_lm = response.headers.get("Last-Modified")
+                        if new_etag or new_lm:
+                            FEED_CACHE[url] = (new_etag, new_lm)
+                            
+                        # Log Metrics
+                        logger.info(f"📥 Fetched {len(feed.entries)} entries from {url}")
+                        return feed
+                        
+                    # Handle other errors
+                    logger.warning(f"⚠️ Feed Fetch Error {response.status}: {url}")
+                    
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(f"⚠️ Feed Fetch Attempt {attempt+1} failed: {e}")
+            if attempt == len(timeouts) - 1:
+                return None
+            await asyncio.sleep(1) # Short wait before retry
+            
+
 
 
 def get_image(entry, base_url: str):
@@ -742,7 +808,16 @@ async def worker():
                         if src["name"] not in BOT_STATE["sources_health"]:
                             BOT_STATE["sources_health"][src["name"]] = {'success': 0, 'fail': 0}
                             
-                        if not feed or not feed.entries: 
+                        if not feed:
+                            BOT_STATE["sources_health"][src["name"]]["fail"] += 1
+                            continue
+                            
+                        # Handle 304 Not Modified (Success but no new data)
+                        if getattr(feed, "status", 200) == 304:
+                            # logger.debug(f"📉 Feed 304: {src['name']}")
+                            continue
+                            
+                        if not feed.entries: 
                             BOT_STATE["sources_health"][src["name"]]["fail"] += 1
                             continue
                         
