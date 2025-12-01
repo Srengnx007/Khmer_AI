@@ -8,3 +8,4 @@ aiosqlite
 pytz
 backoff
 tweepy
+Pillow
