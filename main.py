@@ -945,61 +945,10 @@ HTML = """<!DOCTYPE html>
         h1 {{ text-align: center; color: #4CAF50; margin-bottom: 30px; }}
         .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin: 20px 0; }}
         .card {{ background: linear-gradient(135deg, #1e2a4a 0%, #2d3e5f 100%); padding: 25px; border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }}
-        .card h3 {{ margin: 0; font-size: 2.5em; color: #64B5F6; }}
-        .card p {{ margin-top: 8px; color: #aaa; font-size: 0.9em; }}
-        .btn {{ width: 100%; padding: 18px; background: linear-gradient(135deg, #E91E63, #9C27B0); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 1.3em; font-weight: 600; transition: all 0.3s; }}
-        .btn:hover {{ transform: translateY(-2px); box-shadow: 0 6px 20px rgba(233,30,99,0.4); }}
-        .status-card {{ background: #1a1f3a; padding: 20px; border-radius: 12px; margin: 20px 0; border-left: 4px solid #4CAF50; }}
-        .status-card div {{ margin: 8px 0; font-size: 1.1em; }}
-        .log-box {{ background: #000; padding: 15px; height: 350px; overflow-y: auto; font-family: 'Courier New', monospace; border: 1px solid #333; border-radius: 8px; }}
-        .log-entry {{ border-bottom: 1px solid #222; padding: 4px 0; font-size: 0.85em; }}
-        h3 {{ margin: 20px 0 10px; color: #64B5F6; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🤖 Khmer News Bot 2026</h1>
-        <form action="/trigger" method="post">
-            <button class="btn">⚡ Trigger Check Now</button>
-        </form>
-        <div class="status-card">
-            <div><strong>Status:</strong> {status}</div>
-            <div><strong>Last Run:</strong> {last_run}</div>
-            <div><strong>Next Run:</strong> {next_run}</div>
-        </div>
-        <div class="grid">
-            <div class="card"><h3>{total_posted}</h3><p>Total Posts</p></div>
-            <div class="card"><h3>{fb_posts}</h3><p>Facebook</p></div>
-            <div class="card"><h3>{tg_posts}</h3><p>Telegram</p></div>
-            <div class="card"><h3>{x_posts}</h3><p>X / Twitter</p></div>
-            <div class="card"><h3 style="color:orange">{duplicate_skips}</h3><p>Skips</p></div>
-            <div class="card"><h3 style="color:red">{errors}</h3><p>Errors</p></div>
-        </div>
-        <h3>📜 Live Logs</h3>
         <div class="log-box">{logs}</div>
     </div>
 </body>
 </html>"""
-
-async def dashboard(request):
-    """Dashboard with stats"""
-    logs_html = "".join([
-        f"<div class='log-entry'>{log}</div>" 
-        for log in BOT_STATE["logs"]
-    ])
-    
-    return web.Response(text=HTML.format(
-        status=BOT_STATE["status"],
-        last_run=BOT_STATE["last_run"],
-        next_run=BOT_STATE["next_run"],
-        total_posted=BOT_STATE["total_posted"],
-        fb_posts=BOT_STATE["fb_posts"],
-        tg_posts=BOT_STATE["tg_posts"],
-        x_posts=BOT_STATE["x_posts"],
-        duplicate_skips=BOT_STATE["duplicate_skips"],
-        errors=BOT_STATE["errors"],
-        logs=logs_html
-    ), content_type='text/html')
 
 async def trigger_check(request):
     """Manual trigger endpoint"""
@@ -1036,6 +985,67 @@ async def metrics(request):
     """Metrics endpoint"""
     return web.json_response(BOT_STATE)
 
+async def dashboard(request):
+    """Serve interactive dashboard"""
+    return web.FileResponse('dashboard.html')
+
+async def websocket_handler(request):
+    """Handle WebSocket connections"""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    
+    # Register client
+    request.app['websockets'].add(ws)
+    
+    try:
+        # Send initial state
+        await ws.send_json({
+            "type": "metrics",
+            "payload": {
+                "posts_total": metrics.posts_total.collect()[0].samples[0].value,
+                "errors_total": metrics.errors_total.collect()[0].samples[0].value,
+                "queue_size": metrics.queue_size.collect()[0].samples[0].value,
+                "uptime_seconds": metrics.uptime_seconds.collect()[0].samples[0].value
+            }
+        })
+        
+        async for msg in ws:
+            pass # Keep connection open
+            
+    finally:
+        request.app['websockets'].discard(ws)
+    
+    return ws
+
+async def broadcast_metrics(app):
+    """Background task to broadcast metrics to all connected clients"""
+    while True:
+        await asyncio.sleep(2) # Update every 2s
+        if not app['websockets']: continue
+        
+        try:
+            # Collect current metrics
+            # Note: In a real app, we'd structure this better in metrics.py
+            # For now, we extract raw values
+            data = {
+                "posts_total": sum(s.value for s in metrics.posts_total.collect()[0].samples),
+                "errors_total": sum(s.value for s in metrics.errors_total.collect()[0].samples),
+                "queue_size": metrics.queue_size.collect()[0].samples[0].value,
+                "uptime_seconds": metrics.uptime_seconds.collect()[0].samples[0].value,
+                # Add platform stats for charts
+                "platform_stats": {
+                    "telegram": sum(s.value for s in metrics.posts_total.collect()[0].samples if s.labels['platform'] == 'telegram'),
+                    "facebook": sum(s.value for s in metrics.posts_total.collect()[0].samples if s.labels['platform'] == 'facebook'),
+                    "x": sum(s.value for s in metrics.posts_total.collect()[0].samples if s.labels['platform'] == 'x')
+                }
+            }
+            
+            for ws in set(app['websockets']):
+                await ws.send_json({"type": "metrics", "payload": data})
+                
+        except Exception as e:
+            logger.error(f"Broadcast error: {e}")
+
 async def handle_metrics(request):
     data, content_type = metrics.get_metrics_data()
     return web.Response(body=data, content_type=content_type)
@@ -1043,11 +1053,17 @@ async def handle_metrics(request):
 async def web_server():
     """Start web server"""
     app = web.Application()
+    app['websockets'] = set()
+    
     app.router.add_get("/", dashboard)
+    app.router.add_get("/ws", websocket_handler) # WebSocket Route
     app.router.add_post("/trigger", trigger_check)
     app.router.add_get("/ping", ping)
     app.router.add_get("/health", health_check)
-    app.router.add_get("/metrics", handle_metrics) # Changed to handle_metrics
+    app.router.add_get("/metrics", handle_metrics)
+    
+    # Start background broadcaster
+    asyncio.create_task(broadcast_metrics(app))
     
     runner = web.AppRunner(app)
     await runner.setup()

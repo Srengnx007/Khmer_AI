@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Khmer AI News Bot - Command Center</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #f3f4f6;
+            --bg-secondary: #ffffff;
+            --text-primary: #1f2937;
+            --text-secondary: #6b7280;
+        }
+        .dark {
+            --bg-primary: #111827;
+            --bg-secondary: #1f2937;
+            --text-primary: #f9fafb;
+            --text-secondary: #9ca3af;
+        }
+        body { background-color: var(--bg-primary); color: var(--text-primary); transition: all 0.3s; }
+        .card { background-color: var(--bg-secondary); border-radius: 0.75rem; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+        .pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+        
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 4px; }
+    </style>
+</head>
+<body class="font-sans antialiased">
+    <div class="min-h-screen flex flex-col">
+        <!-- Header -->
+        <header class="bg-blue-600 text-white shadow-lg">
+            <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+                <div class="flex items-center space-x-3">
+                    <i class="fas fa-robot text-2xl"></i>
+                    <h1 class="text-xl font-bold">Khmer AI Bot <span class="text-xs bg-blue-500 px-2 py-1 rounded ml-2">v2.5</span></h1>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <div class="flex items-center space-x-2">
+                        <span id="connection-status" class="w-3 h-3 rounded-full bg-red-500"></span>
+                        <span class="text-sm opacity-90">Live</span>
+                    </div>
+                    <button onclick="toggleTheme()" class="p-2 rounded-full hover:bg-blue-500 transition">
+                        <i class="fas fa-moon"></i>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="flex-1 container mx-auto px-4 py-6 space-y-6">
+            
+            <!-- Status Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div class="card border-l-4 border-green-500">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-sm text-secondary">Total Posts</p>
+                            <h3 class="text-2xl font-bold" id="total-posts">0</h3>
+                        </div>
+                        <i class="fas fa-paper-plane text-green-500 opacity-50 text-xl"></i>
+                    </div>
+                </div>
+                <div class="card border-l-4 border-red-500">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-sm text-secondary">Errors (24h)</p>
+                            <h3 class="text-2xl font-bold text-red-500" id="total-errors">0</h3>
+                        </div>
+                        <i class="fas fa-exclamation-triangle text-red-500 opacity-50 text-xl"></i>
+                    </div>
+                </div>
+                <div class="card border-l-4 border-blue-500">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-sm text-secondary">Queue Size</p>
+                            <h3 class="text-2xl font-bold" id="queue-size">0</h3>
+                        </div>
+                        <i class="fas fa-layer-group text-blue-500 opacity-50 text-xl"></i>
+                    </div>
+                </div>
+                <div class="card border-l-4 border-purple-500">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <p class="text-sm text-secondary">Uptime</p>
+                            <h3 class="text-xl font-bold" id="uptime">0h 0m</h3>
+                        </div>
+                        <i class="fas fa-clock text-purple-500 opacity-50 text-xl"></i>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charts Row -->
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <!-- Line Chart -->
+                <div class="card lg:col-span-2">
+                    <h3 class="font-bold mb-4">Activity (Last 24h)</h3>
+                    <canvas id="activityChart" height="200"></canvas>
+                </div>
+                <!-- Pie Chart -->
+                <div class="card">
+                    <h3 class="font-bold mb-4">Platform Distribution</h3>
+                    <canvas id="platformChart" height="200"></canvas>
+                </div>
+            </div>
+
+            <!-- Live Logs & Queue -->
+            <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <!-- Live Logs -->
+                <div class="card flex flex-col h-96">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="font-bold">Live Logs</h3>
+                        <div class="space-x-2 text-xs">
+                            <span class="px-2 py-1 rounded bg-gray-200 dark:bg-gray-700">INFO</span>
+                            <span class="px-2 py-1 rounded bg-yellow-200 text-yellow-800">WARN</span>
+                            <span class="px-2 py-1 rounded bg-red-200 text-red-800">ERR</span>
+                        </div>
+                    </div>
+                    <div id="log-container" class="flex-1 overflow-y-auto font-mono text-xs space-y-1 p-2 bg-gray-900 text-green-400 rounded">
+                        <!-- Logs will appear here -->
+                    </div>
+                </div>
+
+                <!-- Retry Queue -->
+                <div class="card flex flex-col h-96">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="font-bold">Retry Queue</h3>
+                        <button onclick="refreshQueue()" class="text-sm text-blue-500 hover:underline">Refresh</button>
+                    </div>
+                    <div class="flex-1 overflow-y-auto">
+                        <table class="w-full text-sm text-left">
+                            <thead class="text-xs uppercase bg-gray-100 dark:bg-gray-700">
+                                <tr>
+                                    <th class="px-3 py-2">Article</th>
+                                    <th class="px-3 py-2">Platform</th>
+                                    <th class="px-3 py-2">Retry</th>
+                                    <th class="px-3 py-2">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="queue-table-body">
+                                <!-- Queue items -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Controls -->
+            <div class="card">
+                <h3 class="font-bold mb-4">Manual Controls</h3>
+                <div class="flex space-x-4">
+                    <button onclick="triggerAction('trigger')" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
+                        <i class="fas fa-sync mr-2"></i> Force Check
+                    </button>
+                    <button onclick="triggerAction('clear_cache')" class="px-4 py-2 bg-yellow-600 text-white rounded hover:bg-yellow-700">
+                        <i class="fas fa-broom mr-2"></i> Clear Cache
+                    </button>
+                    <button onclick="triggerAction('restart')" class="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700">
+                        <i class="fas fa-power-off mr-2"></i> Restart Bot
+                    </button>
+                </div>
+            </div>
+
+        </main>
+    </div>
+
+    <script>
+        // --- WebSocket & Real-time Data ---
+        let ws;
+        let activityChart, platformChart;
+        
+        function connectWS() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
+            
+            ws.onopen = () => {
+                document.getElementById('connection-status').classList.remove('bg-red-500');
+                document.getElementById('connection-status').classList.add('bg-green-500', 'pulse');
+                console.log('Connected to WebSocket');
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'metrics') updateMetrics(data.payload);
+                if (data.type === 'log') addLog(data.payload);
+                if (data.type === 'queue') updateQueue(data.payload);
+            };
+            
+            ws.onclose = () => {
+                document.getElementById('connection-status').classList.add('bg-red-500');
+                document.getElementById('connection-status').classList.remove('bg-green-500', 'pulse');
+                setTimeout(connectWS, 3000);
+            };
+        }
+
+        function updateMetrics(data) {
+            document.getElementById('total-posts').innerText = data.posts_total || 0;
+            document.getElementById('total-errors').innerText = data.errors_total || 0;
+            document.getElementById('queue-size').innerText = data.queue_size || 0;
+            document.getElementById('uptime').innerText = formatUptime(data.uptime_seconds || 0);
+            
+            // Update Charts
+            updateCharts(data);
+        }
+
+        function addLog(log) {
+            const container = document.getElementById('log-container');
+            const div = document.createElement('div');
+            const time = new Date().toLocaleTimeString();
+            
+            let color = 'text-green-400';
+            if (log.level === 'warning') color = 'text-yellow-400';
+            if (log.level === 'error') color = 'text-red-400';
+            
+            div.className = `${color} border-b border-gray-800 pb-1`;
+            div.innerHTML = `<span class="opacity-50">[${time}]</span> ${log.message}`;
+            
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+            
+            // Limit logs
+            if (container.children.length > 100) container.removeChild(container.firstChild);
+        }
+        
+        function updateQueue(items) {
+            const tbody = document.getElementById('queue-table-body');
+            tbody.innerHTML = items.map(item => `
+                <tr class="border-b dark:border-gray-700">
+                    <td class="px-3 py-2 truncate max-w-xs">${item.title}</td>
+                    <td class="px-3 py-2"><span class="px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-800">${item.platform}</span></td>
+                    <td class="px-3 py-2">${item.retry_count}/5</td>
+                    <td class="px-3 py-2 text-xs">${item.status}</td>
+                </tr>
+            `).join('');
+        }
+
+        // --- Charts ---
+        function initCharts() {
+            const ctx1 = document.getElementById('activityChart').getContext('2d');
+            activityChart = new Chart(ctx1, {
+                type: 'line',
+                data: {
+                    labels: Array.from({length: 24}, (_, i) => `${i}:00`),
+                    datasets: [{
+                        label: 'Posts',
+                        data: Array(24).fill(0),
+                        borderColor: '#3b82f6',
+                        tension: 0.4,
+                        fill: true,
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)'
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+
+            const ctx2 = document.getElementById('platformChart').getContext('2d');
+            platformChart = new Chart(ctx2, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Telegram', 'Facebook', 'X'],
+                    datasets: [{
+                        data: [0, 0, 0],
+                        backgroundColor: ['#3b82f6', '#1877f2', '#000000']
+                    }]
+                },
+                options: { responsive: true, maintainAspectRatio: false }
+            });
+        }
+        
+        function updateCharts(data) {
+            // Mock data update for demo - in real app, backend sends arrays
+            if (data.platform_stats) {
+                platformChart.data.datasets[0].data = [
+                    data.platform_stats.telegram || 0,
+                    data.platform_stats.facebook || 0,
+                    data.platform_stats.x || 0
+                ];
+                platformChart.update();
+            }
+        }
+
+        // --- Utilities ---
+        function formatUptime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            return `${h}h ${m}m`;
+        }
+
+        function toggleTheme() {
+            document.body.classList.toggle('dark');
+        }
+        
+        async function triggerAction(action) {
+            try {
+                await fetch(`/${action}`, { method: 'POST' });
+                alert(`Action ${action} triggered!`);
+            } catch (e) {
+                alert('Error triggering action');
+            }
+        }
+
+        // Init
+        initCharts();
+        connectWS();
+    </script>
+</body>
+</html>
