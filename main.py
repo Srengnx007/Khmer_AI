@@ -656,11 +656,11 @@ async def worker():
                         
                         # Post to platforms with Rate Checks
                         fb_ok = False
-                        if check_platform_rate_limit("facebook"):
+                        if await check_platform_rate_limit("facebook"):
                             fb_ok = await post_to_facebook(article, emoji)
                             
                         tg_ok = False
-                        if check_platform_rate_limit("telegram"):
+                        if await check_platform_rate_limit("telegram"):
                             tg_ok = await post_to_telegram(article, emoji, is_breaking)
                             
                         x_ok = await post_to_x(article, emoji)
