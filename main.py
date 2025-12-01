@@ -9,6 +9,21 @@
 # - FIX #8: Facebook error logging with response data
 # - Enhancement #13: Image size limit reduced to 5MB
 # - Enhancement #15: Translation fallback to English
+from quality_scorer import scorer
+from image_processor import image_processor
+import logger_config
+
+# Configure Logger
+logger_config.configure_logger()
+logger = logger_config.get_logger(__name__)
+
+# FIX #10: Rate Limit Trackers using time.time() for consistency
+API_USAGE = {}
+# - FIX #2: Added cleanup_scheduler async task
+# - FIX #5: Image failure tracking in post_to_telegram
+# - FIX #8: Facebook error logging with response data
+# - Enhancement #13: Image size limit reduced to 5MB
+# - Enhancement #15: Translation fallback to English
 
 import asyncio
 import json
@@ -130,17 +145,6 @@ async def check_platform_rate_limit(platform: str) -> int:
     return await limiter.acquire(platform)
 
 
-class DashboardHandler(logging.Handler):
-    def emit(self, record):
-        timestamp = datetime.now(config.ICT).strftime("%H:%M:%S")
-        BOT_STATE["logs"].appendleft(f"[{timestamp}] {record.levelname} - {record.getMessage()}")
-
-logger = logging.getLogger("KhmerNewsBot")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setFormatter(JsonFormatter())
-logger.addHandler(handler)
-logger.addHandler(DashboardHandler())
 
 # =========================== SINGLETONS ===========================
 
@@ -822,6 +826,10 @@ async def worker():
                         BOT_STATE["sources_health"][src["name"]]["success"] += 1
                         e = feed.entries[0]
                         aid = await get_article_id(e.title, e.link)
+                        
+                        # Generate Correlation ID
+                        cid = logger_config.new_correlation_id()
+                        log = logger.bind(article_id=aid, source=src["name"], correlation_id=cid)
                         
                         if await db.is_posted(aid): continue
                         

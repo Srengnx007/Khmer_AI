@@ -9,3 +9,4 @@ pytz
 backoff
 tweepy
 Pillow
+structlog
