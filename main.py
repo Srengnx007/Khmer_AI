@@ -648,7 +648,7 @@ async def worker():
                             is_breaking = True
                         
                         # Translate (Rate Limit Check inside not needed as it's 15/min and we are slow)
-                        if not check_platform_rate_limit("gemini"):
+                        if not await check_platform_rate_limit("gemini"):
                             logger.warning("Gemini Rate Limit Hit - Skipping")
                             continue
                             
