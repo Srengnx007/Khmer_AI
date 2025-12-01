@@ -38,6 +38,22 @@ async def init_db():
                             cached_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     """)
+                    # Pending Posts Queue (for Scheduler)
+                    await db.execute("""
+                        CREATE TABLE IF NOT EXISTS pending_posts (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            article_id TEXT,
+                            title TEXT,
+                            link TEXT,
+                            summary TEXT,
+                            image_url TEXT,
+                            source TEXT,
+                            category TEXT,
+                            priority INTEGER DEFAULT 1, -- 1=Normal, 2=High, 3=Breaking
+                            status TEXT DEFAULT 'PENDING', -- PENDING, PROCESSED
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
                     # Retry Queue Table
                     await db.execute("""
                         CREATE TABLE IF NOT EXISTS failed_posts (
@@ -53,7 +69,7 @@ async def init_db():
                         )
                     """)
                     await db.commit()
-            logger.info("✅ Database initialized (Posted + Cache + Retry Queue)")
+            logger.info("✅ Database initialized (Posted + Cache + Retry + Pending)")
             return
         except Exception as e:
             logger.warning(f"⚠️ DB Init failed (Attempt {attempt+1}/3): {e}")
@@ -65,8 +81,14 @@ async def is_posted(aid: str) -> bool:
         try:
             async with db_lock:
                 async with aiosqlite.connect(config.DB_FILE) as db:
+                    # Check both posted table and pending queue to avoid double queuing
                     cur = await db.execute("SELECT 1 FROM posted WHERE article_id=?", (aid,))
-                    return await cur.fetchone() is not None
+                    if await cur.fetchone(): return True
+                    
+                    cur = await db.execute("SELECT 1 FROM pending_posts WHERE article_id=?", (aid,))
+                    if await cur.fetchone(): return True
+                    
+                    return False
         except Exception as e:
             logger.warning(f"⚠️ DB is_posted failed (Attempt {attempt+1}/3): {e}")
             await asyncio.sleep(2)
@@ -103,6 +125,7 @@ async def cleanup_old_records():
                 await db.execute("DELETE FROM posted WHERE posted_at < datetime('now', '-30 days')")
                 await db.execute("DELETE FROM translations WHERE cached_at < datetime('now', '-30 days')")
                 await db.execute("DELETE FROM failed_posts WHERE status='DEAD' AND created_at < datetime('now', '-7 days')")
+                await db.execute("DELETE FROM pending_posts WHERE status='PROCESSED' AND created_at < datetime('now', '-1 days')")
                 await db.commit()
         logger.info("🧹 DB Cleanup complete")
     except Exception as e:
@@ -198,3 +221,50 @@ async def update_retry_status(id: int, status: str, retry_count: int = 0, next_d
                 await db.commit()
     except Exception as e:
         logger.error(f"❌ Failed to update retry status: {e}")
+
+# =========================== PENDING POSTS (SCHEDULER) ===========================
+
+async def add_pending_post(article: dict, priority: int = 1):
+    """Add article to pending queue"""
+    try:
+        async with db_lock:
+            async with aiosqlite.connect(config.DB_FILE) as db:
+                await db.execute("""
+                    INSERT INTO pending_posts(article_id, title, link, summary, image_url, source, category, priority)
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    article.get('article_id'), article['title'], article['link'], 
+                    article['summary'], article.get('image_url'), article['source'], 
+                    article.get('category', 'General'), priority
+                ))
+                await db.commit()
+    except Exception as e:
+        logger.error(f"❌ Failed to add pending post: {e}")
+
+async def get_next_pending_post():
+    """Get next post from queue (Priority > FIFO)"""
+    try:
+        async with db_lock:
+            async with aiosqlite.connect(config.DB_FILE) as db:
+                db.row_factory = aiosqlite.Row
+                # Order by Priority DESC, then Created ASC
+                cur = await db.execute("""
+                    SELECT * FROM pending_posts 
+                    WHERE status='PENDING'
+                    ORDER BY priority DESC, created_at ASC
+                    LIMIT 1
+                """)
+                return await cur.fetchone()
+    except Exception as e:
+        logger.error(f"❌ Failed to get next pending post: {e}")
+        return None
+
+async def mark_pending_processed(id: int):
+    """Mark pending post as processed"""
+    try:
+        async with db_lock:
+            async with aiosqlite.connect(config.DB_FILE) as db:
+                await db.execute("UPDATE pending_posts SET status='PROCESSED' WHERE id=?", (id,))
+                await db.commit()
+    except Exception as e:
+        logger.error(f"❌ Failed to mark pending processed: {e}")

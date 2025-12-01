@@ -12,6 +12,7 @@
 from quality_scorer import scorer
 from image_processor import image_processor
 from metrics import metrics
+from scheduler import scheduler
 import logger_config
 
 # Configure Logger
@@ -760,74 +761,58 @@ async def cleanup_scheduler():
 
 # =========================== WORKER ===========================
 
-async def worker():
-    """Main news processing loop"""
-    # FIX #6: Removed config validation from here (moved to main block)
-    await db.init_db()
-    logger.info("🚀 MEGA NEWS BOT 2026 STARTED")
-    
-    # Initialize variables
-    boost_until = None
+async def fetch_worker():
+    """Producer: Fetches RSS feeds and queues them"""
+    logger.info("� Fetch Worker Started")
     consecutive_errors = 0
-    
-    # Initial Cleanup
-    await db.cleanup_old_records()
     
     while True:
         try:
-            BOT_STATE["last_run"] = datetime.now(config.ICT).strftime("%H:%M:%S")
+            BOT_STATE["status"] = "Fetching"
             now = datetime.now(config.ICT)
-            slot = config.get_current_slot()
-
-            if trigger_event.is_set():
-                logger.info("⚡ Manual Trigger Executing!")
+            
+            # Determine active slots
+            current_hour = now.hour
+            active_slots = [s for s in config.NEWS_SLOTS if s["start"] <= current_hour < s["end"]]
+            
+            if not active_slots and not trigger_event.is_set():
+                BOT_STATE["status"] = "Idle"
+                next_check = (now + timedelta(minutes=30)).strftime("%H:%M:%S")
+                BOT_STATE["next_run"] = next_check
+                logger.info(f"💤 Off-hours. Sleeping until {next_check}")
+                await asyncio.wait_for(trigger_event.wait(), timeout=1800)
                 trigger_event.clear()
-                max_posts = 10
-            elif boost_until and now < boost_until:
-                max_posts = 15
-                logger.info("🔥 BOOST ACTIVE")
-            else:
-                max_posts = max(1, slot["max"] // 4)
-                boost_until = None
+                continue
 
-            BOT_STATE["status"] = f"Processing ({slot['name']})"
-            posted_count = 0
+            slot = active_slots[0] if active_slots else {"delay": 900}
             
-            # Get recent titles for duplicate check
-            recent_titles = await db.get_recent_titles()
-            
-            categories = [
-                ("cambodia", "🇰🇭"), ("international", "🌍"), 
-                ("thai", "🇹🇭"), ("vietnamese", "🇻🇳"), 
-                ("china", "🇨🇳"), ("tech", "💻"), ("crypto", "₿")
-            ]
-
-            for cat, emoji in categories:
-                if posted_count >= max_posts: break
-                for src in config.NEWS_SOURCES.get(cat, []):
-                    if posted_count >= max_posts: break
-                    try:
-                        feed = await fetch_rss(src["rss"])
+            # Process Feeds
+            for src in config.RSS_FEEDS:
+                try:
+                    feed = await fetch_rss(src["url"])
+                    
+                    # Initialize health stats if missing
+                    if src["name"] not in BOT_STATE["sources_health"]:
+                        BOT_STATE["sources_health"][src["name"]] = {'success': 0, 'fail': 0}
                         
-                        # Initialize health stats if missing
-                        if src["name"] not in BOT_STATE["sources_health"]:
-                            BOT_STATE["sources_health"][src["name"]] = {'success': 0, 'fail': 0}
-                            
-                        if not feed:
-                            BOT_STATE["sources_health"][src["name"]]["fail"] += 1
-                            continue
-                            
-                        # Handle 304 Not Modified (Success but no new data)
-                        if getattr(feed, "status", 200) == 304:
-                            # logger.debug(f"📉 Feed 304: {src['name']}")
-                            continue
-                            
-                        if not feed.entries: 
-                            BOT_STATE["sources_health"][src["name"]]["fail"] += 1
-                            continue
+                    if not feed:
+                        BOT_STATE["sources_health"][src["name"]]["fail"] += 1
+                        continue
                         
-                        BOT_STATE["sources_health"][src["name"]]["success"] += 1
-                        e = feed.entries[0]
+                    # Handle 304 Not Modified (Success but no new data)
+                    if getattr(feed, "status", 200) == 304:
+                        continue
+                        
+                    if not feed.entries: 
+                        BOT_STATE["sources_health"][src["name"]]["fail"] += 1
+                        continue
+                    
+                    BOT_STATE["sources_health"][src["name"]]["success"] += 1
+                    metrics.track_api_call("rss")
+                    
+                    # Process Entries
+                    # Limit to 5 newest to avoid spam on restart
+                    for e in feed.entries[:5]:
                         aid = await get_article_id(e.title, e.link)
                         
                         # Generate Correlation ID
@@ -837,118 +822,145 @@ async def worker():
                         if await db.is_posted(aid): continue
                         
                         # Quality Check
-                        q_score, q_reasons = scorer.score_article(article)
+                        article_temp = {
+                            "title": e.title, 
+                            "summary": BeautifulSoup(e.get("summary",""), "html.parser").get_text(strip=True),
+                            "image_url": get_image(e, src["url"]),
+                            "source": src["name"]
+                        }
+                        q_score, q_reasons = scorer.score_article(article_temp)
                         if q_score < 60:
                             logger.info(f"📉 Low Quality ({q_score}): {e.title[:30]}... Reasons: {', '.join(q_reasons)}")
                             continue
                             
                         # Duplicate Check
+                        recent_titles = await db.get_recent_titles()
                         is_dup, match_title, score = detector.is_duplicate(e.title, recent_titles)
                         if is_dup:
                             logger.info(f"⏭️ Skipped Duplicate ({score:.2f}): {e.title[:30]}... == {match_title[:30]}...")
                             BOT_STATE["duplicate_skips"] += 1
-                            await db.mark_as_posted(aid, e.title, cat, src["name"]) # Mark to skip future checks
+                            await db.mark_as_posted(aid, e.title, src.get("category", "General"), src["name"]) 
                             continue
 
+                        # Prepare Article Data
                         article = {
-                            "title": e.title, "link": e.link,
+                            "article_id": aid,
+                            "title": e.title, 
+                            "link": e.link,
                             "summary": BeautifulSoup(e.get("summary",""), "html.parser").get_text(strip=True)[:1000],
                             "image_url": get_image(e, src["url"]),
-                            "source": src["name"]
+                            "source": src["name"],
+                            "category": src.get("category", "General")
                         }
                         
                         # Check breaking news
-                        is_breaking = False
-                        if config.is_breaking_news(article) and not boost_until:
-                            logger.info("🚨 BREAKING NEWS DETECTED -> BOOST ON")
-                            boost_until = now + timedelta(minutes=15)
-                            emoji = "🚨 " + emoji
-                            is_breaking = True
+                        is_breaking = config.is_breaking_news(article)
+                        if is_breaking:
+                            logger.info("🚨 BREAKING NEWS DETECTED")
+                            scheduler.set_burst_mode(True)
+                            
+                        # Add to Pending Queue
+                        priority = 3 if is_breaking else 1
+                        await db.add_pending_post(article, priority)
+                        logger.info(f"📥 Queued: {e.title[:30]} (Priority: {priority})")
                         
-                        # Translate (Rate Limit Check inside not needed as it's 15/min and we are slow)
-                        if (await check_platform_rate_limit("gemini")) is None:
-                            logger.warning("Gemini Rate Limit Hit - Skipping")
-                            continue
-                            
-                        article = await translate(article)
-                        
-                        # Post to platforms with Rate Checks
-                        fb_ok = False
-                        if (await check_platform_rate_limit("facebook")) is not None:
-                            fb_ok = await post_to_facebook(article, emoji)
-                            
-                        tg_ok = False
-                        if (await check_platform_rate_limit("telegram")) is not None:
-                            tg_ok = await post_to_telegram(article, emoji, is_breaking)
-                            
-                        x_ok = await post_to_x(article, emoji)
-
-                        if fb_ok or tg_ok or x_ok:
-                            await db.mark_as_posted(aid, article["title"], cat, src["name"])
-                            recent_titles.append(article["title"]) # Update local cache
-                            posted_count += 1
-                            BOT_STATE["total_posted"] += 1
-                            consecutive_errors = 0 # Reset error counter
-                            
-                            logger.info(
-                                f"✅ Posted: {article['title_kh'][:40]}... "
-                                f"[FB: {fb_ok}, TG: {tg_ok}, X: {x_ok}]"
-                            )
-                            
-                            # Delay between posts
-                            post_delay = 5 if boost_until else 15
-                            await asyncio.sleep(post_delay)
-                    
-                    except Exception as e:
-                        logger.error(f"❌ Error processing {src['name']}: {e}")
-                        BOT_STATE["errors"] += 1
-                        if src["name"] not in BOT_STATE["sources_health"]:
-                            BOT_STATE["sources_health"][src["name"]] = {'success': 0, 'fail': 0}
-                        BOT_STATE["sources_health"][src["name"]]["fail"] += 1
+                except Exception as e:
+                    logger.error(f"❌ Source Error {src['name']}: {e}")
+                    metrics.increment_error("source_error")
             
             # Calculate next run
-            next_wait = 60 if boost_until else slot["delay"]
+            next_wait = slot["delay"]
             next_time = (datetime.now(config.ICT) + timedelta(seconds=next_wait)).strftime("%H:%M:%S")
             BOT_STATE["next_run"] = next_time
             BOT_STATE["status"] = "Sleeping"
             
-            logger.info(f"✓ Cycle done. Posted: {posted_count}. Next: {next_time}")
+            logger.info(f"✓ Fetch Cycle done. Next: {next_time}")
             
             try:
                 await asyncio.wait_for(trigger_event.wait(), timeout=next_wait)
+                trigger_event.clear()
             except asyncio.TimeoutError:
                 pass 
 
         except Exception as e:
             consecutive_errors += 1
             wait_time = min(300, 60 * (2 ** max(0, consecutive_errors - 5)))
-            logger.error(f"Loop error (Count {consecutive_errors}): {e}. Waiting {wait_time}s")
-            
-            if consecutive_errors >= 5:
-                await send_error_report(f"Persistent Worker Error ({consecutive_errors})", traceback.format_exc())
-                
+            logger.error(f"Fetch Loop error (Count {consecutive_errors}): {e}. Waiting {wait_time}s")
             await asyncio.sleep(wait_time)
+
+async def publish_worker():
+    """Consumer: Reads pending posts and publishes based on schedule"""
+    logger.info("📰 Publish Worker Started")
+    while True:
+        try:
+            # 1. Get next pending post
+            row = await db.get_next_pending_post()
+            if not row:
+                await asyncio.sleep(10)
+                continue
+                
+            article = dict(row)
+            priority = article['priority']
+            category = article['category']
+            
+            # 2. Check Schedule
+            if not scheduler.can_post("telegram", category, priority):
+                # Wait a bit before checking again
+                await asyncio.sleep(30) 
+                continue
+                
+            # 3. Translate
+            try:
+                # Re-check Gemini Rate Limit
+                if (await check_platform_rate_limit("gemini")) is None:
+                    await asyncio.sleep(5)
+                    continue
+                    
+                article = await translate(article)
+            except Exception as e:
+                logger.error(f"Translation failed in publisher: {e}")
+                await db.mark_pending_processed(row['id']) 
+                continue
+
+            # 4. Post
+            is_breaking = (priority >= 3)
+            emoji = "🚨" if is_breaking else "📰"
+            
+            # Facebook
+            if (await check_platform_rate_limit("facebook")) is not None:
+                await post_to_facebook(article, emoji)
+                scheduler.record_post("facebook", category)
+                
+            # Telegram
+            if (await check_platform_rate_limit("telegram")) is not None:
+                await post_to_telegram(article, emoji, is_breaking)
+                scheduler.record_post("telegram", category)
+                
+            # X
+            await post_to_x(article, emoji)
+            scheduler.record_post("x", category)
+            
+            # 5. Mark as Done
+            await db.mark_as_posted(article['article_id'], article['title'], category, article['source'])
+            await db.mark_pending_processed(row['id'])
+            
+            metrics.increment_post("total", "success")
+            BOT_STATE["total_posted"] += 1
+            BOT_STATE["last_run"] = datetime.now(config.ICT).strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Jitter delay
+            delay = config.POST_DELAY_NORMAL + scheduler.get_jitter()
+            if delay < 5: delay = 5
+            logger.info(f"💤 Sleeping {delay}s...")
+            await asyncio.sleep(delay)
+            
+        except Exception as e:
+            logger.error(f"❌ Publish Worker Error: {e}")
+            await asyncio.sleep(10)
         
 # =========================== WEB SERVER ===========================
 
-HTML = """<!DOCTYPE html>
-<html>
-<head>
-    <title>Khmer News Bot 2026</title>
-    <meta http-equiv="refresh" content="30">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta charset="UTF-8">
-    <style>
-        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0e27; color: #fff; padding: 20px; }}
-        .container {{ max-width: 1000px; margin: 0 auto; }}
-        h1 {{ text-align: center; color: #4CAF50; margin-bottom: 30px; }}
-        .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin: 20px 0; }}
-        .card {{ background: linear-gradient(135deg, #1e2a4a 0%, #2d3e5f 100%); padding: 25px; border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.3); }}
-        <div class="log-box">{logs}</div>
-    </div>
-</body>
-</html>"""
+
 
 async def trigger_check(request):
     """Manual trigger endpoint"""
@@ -1077,9 +1089,10 @@ async def main():
     """Main entry point"""
     await asyncio.gather(
         web_server(),
-        worker(),
-        cleanup_scheduler(),  # FIX #2: Add cleanup scheduler
-        retry_worker()        # Retry System
+        fetch_worker(),       # Producer
+        publish_worker(),     # Consumer
+        cleanup_scheduler(),  # Cleanup
+        retry_worker()        # Retries
     )
 
 if __name__ == "__main__":
