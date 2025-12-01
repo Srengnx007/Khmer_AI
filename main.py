@@ -341,13 +341,51 @@ async def get_article_id(title: str, link: str):
 
 # =========================== TRANSLATION ===========================
 
-# Translation failure tracking
+# Custom Exceptions
+class TranslationError(Exception): pass
+class RateLimitError(TranslationError): pass
+class SafetyBlockError(TranslationError): pass
+class ParseError(TranslationError): pass
+
+# Circuit Breaker
+class CircuitBreaker:
+    def __init__(self, failure_threshold=5, recovery_timeout=600):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failures = 0
+        self.last_failure_time = 0
+        self.state = "CLOSED" # CLOSED, OPEN, HALF-OPEN
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+        if self.failures >= self.failure_threshold:
+            self.state = "OPEN"
+            logger.warning(f"🔌 Circuit Breaker OPENED: Too many failures ({self.failures})")
+
+    def record_success(self):
+        self.failures = 0
+        self.state = "CLOSED"
+
+    def allow_request(self):
+        if self.state == "CLOSED":
+            return True
+        if self.state == "OPEN":
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = "HALF-OPEN"
+                logger.info("🔌 Circuit Breaker HALF-OPEN: Testing service...")
+                return True
+            return False
+        return True # HALF-OPEN
+
+gemini_circuit = CircuitBreaker()
+
 # Translation failure tracking
 TRANSLATION_FAILURES = {}
 
-@backoff.on_exception(backoff.expo, Exception, max_tries=3)
+@backoff.on_exception(backoff.expo, (RateLimitError, aiohttp.ClientError), max_tries=3, jitter=backoff.full_jitter)
 async def translate(article: dict):
-    """Translate article to Khmer with caching"""
+    """Translate article to Khmer with caching, retries, and circuit breaker"""
     aid = await get_article_id(article['title'], article['link'])
     
     # Check cache first
@@ -358,64 +396,89 @@ async def translate(article: dict):
         BOT_STATE["cache_hits"] += 1
         logger.debug(f"✅ Cache hit for: {article['title'][:30]}")
         return article
-    
+
+    # Circuit Breaker Check
+    if not gemini_circuit.allow_request():
+        logger.warning("🔌 Circuit Breaker OPEN: Skipping translation")
+        return article
+
     # Rate limit check handled in worker
     
-    prompt = f"""Translate to natural, engaging Khmer for Telegram news:
+    # Prompt Engineering
+    base_prompt = """Translate to natural, engaging Khmer for Telegram news:
+    
+    Title: {title}
+    Summary: {summary}
+    
+    Output JSON only: {{"title_kh": "...", "body_kh": "..."}}"""
+    
+    simple_prompt = """Translate to Khmer JSON: {{"title_kh": "...", "body_kh": "..."}}
+    
+    {title}
+    {summary}"""
 
-Title: {article['title']}
-Content: {article['summary'][:2500]}
-
-Return ONLY valid JSON with no markdown:
-{{"title_kh": "...", "body_kh": "..."}}"""
-
+    model = genai.GenerativeModel(config.GEMINI_MODEL)
+    
     try:
-        model = genai.GenerativeModel(config.GEMINI_MODEL)
+        # Attempt Translation
+        try:
+            response = await model.generate_content_async(
+                base_prompt.format(title=article["title"], summary=article["summary"]),
+                safety_settings=SAFETY_SETTINGS
+            )
+        except Exception as e:
+            # Fallback to simple prompt if complex fails
+            logger.warning(f"⚠️ Complex prompt failed, trying simple: {e}")
+            response = await model.generate_content_async(
+                simple_prompt.format(title=article["title"], summary=article["summary"]),
+                safety_settings=SAFETY_SETTINGS
+            )
+
+        # Handle Safety Blocks
+        if response.prompt_feedback and response.prompt_feedback.block_reason:
+            raise SafetyBlockError(f"Blocked: {response.prompt_feedback.block_reason}")
+            
+        if not response.parts:
+            raise TranslationError("Empty response from Gemini")
+
+        text = response.text
         
-        response = await asyncio.to_thread(
-            model.generate_content, 
-            prompt, 
-            safety_settings=SAFETY_SETTINGS
-        )
-        
-        text = response.text.strip()
-        
-        # Clean markdown
-        text = re.sub(r"```json|```", "", text, flags=re.IGNORECASE).strip()
-        
-        # Extract JSON
+        # Parse JSON
         start = text.find("{")
         end = text.rfind("}") + 1
-        if start != -1 and end != -1:
-            text = text[start:end]
+        if start == -1 or end == -1:
+            raise ParseError("No JSON found in response")
+            
+        data = json.loads(text[start:end])
         
-        data = json.loads(text)
-        
-        article["title_kh"] = data.get("title_kh", article["title"])
-        article["body_kh"] = data.get("body_kh", article["summary"][:500])
+        # Validate Schema
+        if "title_kh" not in data or "body_kh" not in data:
+            raise ParseError("Missing required keys in JSON")
+
+        article["title_kh"] = data["title_kh"]
+        article["body_kh"] = data["body_kh"]
         
         # Save to cache
         await db.save_translation(aid, article["title_kh"], article["body_kh"])
         
         BOT_STATE["translations"] += 1
+        gemini_circuit.record_success()
         logger.info(f"✅ Translated: {article['title'][:30]}")
         
         # Rate limiting delay
-        await asyncio.sleep(config.TRANSLATION_DELAY)  # Using constant
-        
-    except json.JSONDecodeError as e:
-        logger.warning(f"⚠️ JSON parse error: {e}")
-        article["title_kh"] = article["title"]
-        article["body_kh"] = article["summary"][:500]
-        BOT_STATE["errors"] += 1
-        TRANSLATION_FAILURES[aid] = TRANSLATION_FAILURES.get(aid, 0) + 1
+        await asyncio.sleep(config.TRANSLATION_DELAY)
         
     except Exception as e:
+        gemini_circuit.record_failure()
         logger.error(f"❌ Translation error: {e}")
+        
+        # Log failed prompt for debugging
+        logger.debug(f"Failed Prompt Context: {article['title']}")
+        
         TRANSLATION_FAILURES[aid] = TRANSLATION_FAILURES.get(aid, 0) + 1
         BOT_STATE["errors"] += 1
         
-        # Enhancement #15: Translation fallback after 3 failures
+        # Fallback logic
         if TRANSLATION_FAILURES.get(aid, 0) >= 3:
             logger.warning("⚠️ Translation failed 3 times, using English with disclaimer")
             article["title_kh"] = "⚠️ ស្រាប់ភាសាអង់គ្លេស (Translation unavailable) - " + article["title"]
@@ -423,19 +486,13 @@ Return ONLY valid JSON with no markdown:
         else:
             article["title_kh"] = article["title"]
             article["body_kh"] = article["summary"][:500]
-        
-        await send_error_report(
-            "Translation Failed",
-            str(e),
-            extra_context={
-                'article_id': aid,
-                'source': article['source'],
-                'title': article['title'][:50]
-            }
-        )
-    
+            
+        # Re-raise RateLimitError to trigger backoff
+        if "429" in str(e) or "ResourceExhausted" in str(e):
+            raise RateLimitError("Gemini Rate Limit Exceeded") from e
+            
     return article
-
+    
 # =========================== POSTING ===========================
 
 @backoff.on_exception(backoff.expo, Exception, max_tries=3)
