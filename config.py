@@ -2,6 +2,7 @@ import os
 import pytz
 from datetime import datetime
 from dotenv import load_dotenv
+import logging
 
 # Load Environment Variables
 load_dotenv()
@@ -11,53 +12,56 @@ load_dotenv()
 # 1. Telegram Settings
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID")
-TG_LINK_FOR_FB = "https://t.me/AIDailyNewsKH"
-TELEGRAM_PERSONAL_ID = 8134594049
 TELEGRAM_LOG_CHANNEL_ID = os.getenv("TELEGRAM_LOG_CHANNEL_ID")
+TELEGRAM_PERSONAL_ID = os.getenv("TELEGRAM_PERSONAL_ID", "8134594049")
+TG_LINK_FOR_FB = "https://t.me/AIDailyNewsKH"
 
 # 2. Facebook Settings
 FB_PAGE_ID = os.getenv("FB_PAGE_ID")
 FB_ACCESS_TOKEN = os.getenv("FB_ACCESS_TOKEN")
+FB_API_VERSION = "v19.0"
 FB_LINK_FOR_TG = "https://www.facebook.com/profile.php?id=61584116626111"
 
-# 3. AI Settings
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.0-flash"
-FB_API_VERSION = "v19.0" 
-CHECK_INTERVAL = 900  # 15 minutes normal cycle
-
-# Rate Limits (Calls per window)
-RATE_LIMITS = {
-    "telegram": {"calls": 30, "period": 60},    # 30/min
-    "facebook": {"calls": 200, "period": 3600}, # 200/hr
-    "x":        {"calls": 50, "period": 900},   # 50/15min
-    "gemini":   {"calls": 15, "period": 60}     # 15/min
-}
-
-# FIX #22: Application Constants
-SIMILARITY_THRESHOLD = 0.85  # Duplicate detection threshold
-MAX_TWEET_LENGTH = 280       # X/Twitter character limit
-IMAGE_MAX_SIZE_MB = 5        # Maximum image size in MB
-POST_DELAY_BOOST = 5         # Seconds between posts in boost mode
-POST_DELAY_NORMAL = 15       # Seconds between posts normally
-TRANSLATION_DELAY = 7        # Seconds delay for translation
-
-# 7. X (Twitter) Settings
+# 3. X (Twitter) Settings
 X_API_KEY = os.getenv("X_API_KEY")
 X_API_SECRET = os.getenv("X_API_SECRET")
 X_ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
 X_ACCESS_TOKEN_SECRET = os.getenv("X_ACCESS_TOKEN_SECRET")
 X_USERNAME = "@AIDailyNewskh"
 
-# 4. System Settings
+# 4. AI Settings
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = "gemini-2.0-flash"
+
+# 5. System Settings
 ICT = pytz.timezone('Asia/Phnom_Penh')
 DB_FILE = "posted_articles.db"
 PORT = int(os.environ.get("PORT", 8080))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+# 6. Application Constants
+CHECK_INTERVAL = 900  # 15 minutes normal cycle
+SIMILARITY_THRESHOLD = 0.85
+MAX_TWEET_LENGTH = 280
+IMAGE_MAX_SIZE_MB = 5
+POST_DELAY_BOOST = 5
+POST_DELAY_NORMAL = 15
+TRANSLATION_DELAY = 7
+BURST_MODE_DEFAULT = False
+
+# 7. Rate Limits (Calls per window)
+RATE_LIMITS = {
+    "telegram": {"calls": 20, "period": 60},     # 20/min (Safe)
+    "facebook": {"calls": 10, "period": 3600},   # 10/hr (Very Safe)
+    "x":        {"calls": 15, "period": 900},    # 15/15min (Free Tier)
+    "gemini":   {"calls": 15, "period": 60},     # 15/min
+    "rss":      {"calls": 100, "period": 60}     # Internal fetch limit
+}
 
 # =========================== NEWS SOURCES ===========================
 NEWS_SOURCES = {
     "cambodia": [
-        {"name": "Thmey Thmey",    "rss": "https://thmeythmey.com/feed",                   "url": "https://thmeythmey.com"},
+        {"name": "Thmey Thmey",    "rss": "https://thmeythmey.com/rss",                   "url": "https://thmeythmey.com"},
         {"name": "Koh Santepheap", "rss": "https://kohsantepheapdaily.com.kh/feed",        "url": "https://kohsantepheapdaily.com.kh"},
         {"name": "DAP News",       "rss": "https://www.dap-news.com/feed",                 "url": "https://www.dap-news.com"},
         {"name": "Khmer Times",    "rss": "https://www.khmertimeskh.com/feed/",            "url": "https://www.khmertimeskh.com"},
@@ -102,41 +106,61 @@ NEWS_SOURCES = {
     ]
 }
 
+# Flattened list for easy iteration
+RSS_FEEDS = []
+for category, feeds in NEWS_SOURCES.items():
+    for feed in feeds:
+        feed['category'] = category
+        RSS_FEEDS.append(feed)
+
 # =========================== HELPER FUNCTIONS ===========================
-def get_current_slot():
-    now = datetime.now(ICT)
-    h = now.hour + now.minute / 60
-    if 5 <= h < 8:       return {"name": "Morning 🌅",      "max": 8, "delay": 60}
-    if 8 <= h < 11.5:    return {"name": "Work AM 💼",      "max": 5, "delay": 90}
-    if 11.5 <= h < 13.5: return {"name": "Lunch Peak 🍱",   "max": 8, "delay": 45}
-    if 13.5 <= h < 17:   return {"name": "Afternoon ☕",    "max": 5, "delay": 120}
-    if 17 <= h < 21:     return {"name": "Prime Time 📺",   "max": 10, "delay": 40}
-    if 21 <= h < 23:     return {"name": "Night 🌙",        "max": 4, "delay": 150}
-    return                       {"name": "Deep Night 💤",   "max": 1, "delay": 300}
 
 def is_breaking_news(article):
+    """Detect breaking news based on keywords and source"""
     score = 0
-    title = article['title'].lower()
-    kws = ["breaking", "urgent", "shooting", "explosion", "crash", "dead", "crisis", "war", 
-           "បន្ទាន់", "ភ្លាម", "បាញ់", "ផ្ទុះ", "ស្លាប់", "គ្រោះថ្នាក់", "រញ្ជួយដី"]
+    title = article.get('title', '').lower()
+    
+    # Keywords (Khmer & English)
+    kws = [
+        "breaking", "urgent", "shooting", "explosion", "crash", "dead", "crisis", "war", "assassination",
+        "បន្ទាន់", "ភ្លាម", "បាញ់", "ផ្ទុះ", "ស្លាប់", "គ្រោះថ្នាក់", "រញ្ជួយដី", "សង្គ្រាម", "វិបត្តិ"
+    ]
+    
     for w in kws:
         if w in title: score += 100
+        
     if "!" in title: score += 10
     
-    if article['source'] in ["Khmer Times", "BBC News", "CNN", "Thmey Thmey"]: score += 20
-    
-    if article['source'] in ["Khmer Times", "BBC News", "CNN", "Thmey Thmey"]: score += 20
+    # Boost reliable sources
+    if article.get('source') in ["Khmer Times", "BBC News", "CNN", "Thmey Thmey", "Fresh News"]: 
+        score += 20
     
     return score >= 100
 
+# News Slots (Hours 0-23)
+NEWS_SLOTS = [
+    {"start": 7, "end": 9, "delay": 300, "max": 10, "name": "Morning Rush"},
+    {"start": 11, "end": 13, "delay": 300, "max": 10, "name": "Lunch Break"},
+    {"start": 17, "end": 20, "delay": 300, "max": 10, "name": "Evening News"},
+    {"start": 0, "end": 24, "delay": 900, "max": 5, "name": "Standard Flow"} # Default
+]
+
 def validate_config():
+    """Validate critical configuration"""
     required = [
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHANNEL_ID",
-        "FB_PAGE_ID", "FB_ACCESS_TOKEN",
-        "GEMINI_API_KEY",
-        "X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET"
+        "GEMINI_API_KEY"
     ]
-    missing = [key for key in required if not os.getenv(key)]
+    missing = [key for key in required if not globals().get(key)]
+    
     if missing:
-        raise ValueError(f"❌ Missing Required Config: {', '.join(missing)}")
+        raise ValueError(f"❌ Missing Critical Env Vars: {', '.join(missing)}")
+    
+    # Optional warnings
+    if not (FB_PAGE_ID and FB_ACCESS_TOKEN):
+        logging.warning("⚠️ Facebook credentials missing. FB posting will be disabled.")
+    
+    if not (X_API_KEY and X_API_SECRET):
+        logging.warning("⚠️ X (Twitter) credentials missing. X posting will be disabled.")
+        
     return True

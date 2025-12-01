@@ -1,40 +1,42 @@
-import re
-import time
 import logging
-from datetime import datetime, timedelta
+import asyncio
+from datetime import datetime
+
+# Try importing Transformers
+try:
+    from transformers import pipeline
+    AI_SCORER_AVAILABLE = True
+    # Load zero-shot classifier (lightweight)
+    classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli", device=-1) # CPU
+except ImportError:
+    AI_SCORER_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 class QualityScorer:
     def __init__(self):
-        # Scoring Weights (Total = 100)
         self.weights = {
             "title": 15,
             "summary": 20,
             "image": 10,
             "source": 15,
-            "freshness": 20,
-            "spam": 10,
+            "ai_score": 30, # New AI component
             "language": 10
         }
         
-        # Thresholds
-        self.MIN_TITLE_LEN = 20
-        self.MAX_TITLE_LEN = 200
-        self.MIN_SUMMARY_LEN = 100
-        self.SPAM_KEYWORDS = ["buy now", "click here", "subscribe", "free money", "winner", "lottery"]
-        self.SENSITIVE_KEYWORDS = ["sex", "porn", "xxx", "gambling", "casino"] # Simple list, expand as needed
+        self.SPAM_KEYWORDS = ["buy now", "click here", "subscribe", "free money", "winner", "lottery", "casino"]
+        self.SENSITIVE_KEYWORDS = ["sex", "porn", "xxx", "gambling"]
         
-        # Source Reliability (1.0 = standard, <1.0 = penalty, >1.0 = boost)
         self.source_weights = {
             "Fresh News": 1.1,
             "Koh Santepheap": 1.0,
             "Phnom Penh Post": 1.2,
             "Cambodia Daily": 1.1,
-            # Add others as needed
+            "Khmer Times": 1.1,
+            "BBC News": 1.3
         }
 
-    def score_article(self, article: dict) -> tuple:
+    async def score_article(self, article: dict) -> tuple:
         """
         Score article quality from 0-100.
         Returns: (score, reason_list)
@@ -42,65 +44,62 @@ class QualityScorer:
         score = 0
         reasons = []
         
-        # 1. Title Quality (15 pts)
+        # 1. Basic Checks
         title = article.get("title", "")
-        if self.MIN_TITLE_LEN <= len(title) <= self.MAX_TITLE_LEN:
-            score += self.weights["title"]
-        else:
-            reasons.append(f"Title length {len(title)} out of range")
-            
-        # 2. Summary Completeness (20 pts)
         summary = article.get("summary", "")
-        if len(summary) >= self.MIN_SUMMARY_LEN:
-            score += self.weights["summary"]
-        else:
-            # Partial score
-            ratio = len(summary) / self.MIN_SUMMARY_LEN
-            points = int(self.weights["summary"] * ratio)
-            score += points
-            reasons.append(f"Summary too short ({len(summary)} chars)")
-            
-        # 3. Image Quality (10 pts)
-        # Assuming image_url presence implies validation passed (since we validate before scoring usually, or we check here)
-        if article.get("image_url"):
-            score += self.weights["image"]
-        else:
-            reasons.append("No image")
-            
-        # 4. Source Reliability (15 pts)
+        
+        if len(title) < 20: reasons.append("Title too short")
+        else: score += self.weights["title"]
+        
+        if len(summary) < 100: reasons.append("Summary too short")
+        else: score += self.weights["summary"]
+        
+        if article.get("image_url"): score += self.weights["image"]
+        else: reasons.append("No image")
+        
+        # Source Weight
         source = article.get("source", "Unknown")
-        weight = self.source_weights.get(source, 1.0)
-        points = int(self.weights["source"] * weight)
-        # Cap at 15
-        points = min(points, self.weights["source"])
-        score += points
+        w = self.source_weights.get(source, 1.0)
+        score += min(int(self.weights["source"] * w), 20)
         
-        # 5. Freshness (20 pts)
-        # Assuming article has 'published_parsed' or we estimate
-        # If not present, we assume it's fresh enough if it was just fetched, but let's check if available
-        # For RSS, we usually have it. If not, give full points (benefit of doubt)
-        # Here we'll use a placeholder logic if published date isn't passed explicitly, 
-        # but usually we process fresh feeds.
-        # Let's assume 'freshness' is high for now unless we parse date.
-        score += self.weights["freshness"] 
-        
-        # 6. Spam/Clickbait Detection (10 pts)
+        # 2. Keyword Safety Check
         text = (title + " " + summary).lower()
-        if any(kw in text for kw in self.SPAM_KEYWORDS):
-            reasons.append("Spam keywords detected")
-        elif title.isupper() and len(title) > 10:
-            reasons.append("Excessive CAPS in title")
-        else:
-            score += self.weights["spam"]
-            
-        # 7. Language/Sensitivity (10 pts)
         if any(kw in text for kw in self.SENSITIVE_KEYWORDS):
-            score = 0 # Immediate fail
-            reasons.append("Sensitive/Profane content detected")
+            return 0, ["Sensitive content detected"]
+            
+        if any(kw in text for kw in self.SPAM_KEYWORDS):
+            reasons.append("Spam keywords")
         else:
             score += self.weights["language"]
             
-        return score, reasons
+        # 3. AI Scoring (Zero-Shot)
+        ai_score = 0
+        if AI_SCORER_AVAILABLE:
+            try:
+                # Classify into categories
+                labels = ["news", "spam", "clickbait", "sensitive"]
+                result = await asyncio.to_thread(classifier, title + ". " + summary, labels)
+                
+                # result['labels'] and result['scores'] are sorted
+                top_label = result['labels'][0]
+                top_score = result['scores'][0]
+                
+                if top_label == "news" and top_score > 0.6:
+                    ai_score = 30
+                elif top_label in ["spam", "clickbait", "sensitive"]:
+                    ai_score = 0
+                    reasons.append(f"AI detected {top_label} ({top_score:.2f})")
+                else:
+                    ai_score = 15 # Neutral
+            except Exception as e:
+                logger.error(f"AI Scorer failed: {e}")
+                ai_score = 15 # Fallback
+        else:
+            ai_score = 30 # Assume good if no AI available to prove otherwise
+            
+        score += ai_score
+        
+        return min(score, 100), reasons
 
 # Global Instance
 scorer = QualityScorer()

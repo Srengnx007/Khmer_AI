@@ -16,7 +16,10 @@ class MetricsCollector:
         
         # 2. Gauges
         self.queue_size = Gauge('queue_size', 'Current items in processing queue')
+        self.retry_queue_size = Gauge('retry_queue_size', 'Current items in retry queue')
         self.memory_usage = Gauge('memory_usage_mb', 'Memory usage in MB')
+        self.cpu_usage = Gauge('cpu_usage_percent', 'CPU usage percent')
+        self.disk_usage = Gauge('disk_usage_percent', 'Disk usage percent')
         self.uptime_seconds = Gauge('uptime_seconds', 'Bot uptime in seconds')
         self.source_health = Gauge('source_health', 'Source health score (0-100)', ['source'])
         
@@ -31,9 +34,9 @@ class MetricsCollector:
         self.rate_limit_window = defaultdict(list)
         
         # Alert Thresholds
-        self.ALERT_ERROR_RATE = 0.10 # 10%
+        self.ALERT_ERROR_RATE = 10 # 10 errors in 5 mins
         self.ALERT_NO_POSTS = 1800 # 30 mins
-        self.ALERT_MEMORY = 800 # 800MB (assuming 1GB limit approx)
+        self.ALERT_MEMORY = 1024 # 1GB
         
     def increment_post(self, platform: str, status: str = "success"):
         self.posts_total.labels(platform=platform, status=status).inc()
@@ -55,11 +58,16 @@ class MetricsCollector:
         self.rate_limit_window[platform].append(now)
         
     def update_system_metrics(self):
-        """Update system-level metrics (memory, uptime)"""
-        process = psutil.Process()
-        mem = process.memory_info().rss / 1024 / 1024 # MB
-        self.memory_usage.set(mem)
-        self.uptime_seconds.set(time.time() - self.start_time)
+        """Update system-level metrics (memory, cpu, disk)"""
+        try:
+            process = psutil.Process()
+            mem = process.memory_info().rss / 1024 / 1024 # MB
+            self.memory_usage.set(mem)
+            self.cpu_usage.set(psutil.cpu_percent(interval=None))
+            self.disk_usage.set(psutil.disk_usage('/').percent)
+            self.uptime_seconds.set(time.time() - self.start_time)
+        except Exception as e:
+            logger.error(f"Failed to update system metrics: {e}")
         
     def check_alerts(self) -> list:
         """Check for alert conditions"""
@@ -68,25 +76,24 @@ class MetricsCollector:
         
         # 1. Error Rate (Errors in last 5 mins)
         recent_errors = [t for t in self.error_window if now - t < 300]
-        if len(recent_errors) > 10: # Minimum threshold to avoid noise
-            # This is a simple count check, for rate we'd need total ops. 
-            # For now, >10 errors in 5 mins is alarming enough.
-            alerts.append(f"High Error Rate: {len(recent_errors)} errors in last 5m")
+        if len(recent_errors) >= self.ALERT_ERROR_RATE:
+            alerts.append(f"🚨 High Error Rate: {len(recent_errors)} errors in last 5m")
             
         # 2. Zero Posts
         if now - self.last_post_time > self.ALERT_NO_POSTS:
-            alerts.append(f"No posts for {int((now - self.last_post_time)/60)} minutes")
+            minutes = int((now - self.last_post_time)/60)
+            alerts.append(f"⚠️ No posts for {minutes} minutes")
             
         # 3. Memory Usage
         process = psutil.Process()
         mem = process.memory_info().rss / 1024 / 1024
         if mem > self.ALERT_MEMORY:
-            alerts.append(f"High Memory Usage: {mem:.1f}MB")
+            alerts.append(f"⚠️ High Memory Usage: {mem:.1f}MB")
             
         # 4. Rate Limits
         for platform, times in self.rate_limit_window.items():
-            if len(times) >= 3:
-                alerts.append(f"Rate Limit Warning: {platform} hit {len(times)} times in 1h")
+            if len(times) >= 5: # 5 hits in 1 hour is suspicious
+                alerts.append(f"⚠️ Rate Limit Warning: {platform} hit {len(times)} times in 1h")
                 
         return alerts
 

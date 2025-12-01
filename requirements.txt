@@ -13,3 +13,8 @@ structlog
 prometheus-client
 psutil
 deep-translator
+# AI / NLP Dependencies
+khmer-nltk
+# nudenet  # Commented out to avoid massive download/build issues in this env, fallback is implemented
+# transformers # Commented out to avoid massive download/build issues in this env, fallback is implemented
+# torch

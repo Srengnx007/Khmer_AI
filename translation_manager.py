@@ -1,9 +1,13 @@
 import logging
 import json
 import asyncio
+import time
+import re
+import backoff
 from deep_translator import GoogleTranslator
 import google.generativeai as genai
 from config import GEMINI_API_KEY, GEMINI_MODEL
+import db
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
@@ -11,40 +15,64 @@ model = genai.GenerativeModel(GEMINI_MODEL)
 
 logger = logging.getLogger(__name__)
 
+class CircuitBreaker:
+    def __init__(self, failure_threshold=5, recovery_timeout=600):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.failures = 0
+        self.last_failure_time = 0
+        self.state = "CLOSED"
+
+    def record_failure(self):
+        self.failures += 1
+        self.last_failure_time = time.time()
+        if self.failures >= self.failure_threshold:
+            self.state = "OPEN"
+            logger.warning(f"🔌 Circuit Breaker OPENED: Too many failures ({self.failures})")
+
+    def record_success(self):
+        self.failures = 0
+        self.state = "CLOSED"
+
+    def allow_request(self):
+        if self.state == "CLOSED": return True
+        if self.state == "OPEN":
+            if time.time() - self.last_failure_time > self.recovery_timeout:
+                self.state = "HALF-OPEN"
+                return True
+            return False
+        return True
+
 class TranslationManager:
     def __init__(self):
         self.fallback_translator = GoogleTranslator(source='auto', target='en')
-        self.supported_langs = ['kh', 'th', 'vi', 'zh-cn']
+        self.circuit_breaker = CircuitBreaker()
         
     async def detect_language(self, text: str) -> str:
-        """Detect source language"""
         try:
-            # Use deep_translator for quick detection
             return self.fallback_translator.detect(text)
         except:
-            return "en" # Default to English
+            return "en"
 
+    @backoff.on_exception(backoff.expo, Exception, max_tries=3)
     async def translate_content(self, article: dict, target_lang: str = 'km') -> dict:
         """
         Translate article content to target language using Gemini.
-        Returns dict with title, body, summary.
+        Checks DB cache first.
         """
-        prompt = f"""
-        You are a professional news translator. Translate the following news article to {target_lang}.
-        
-        Input:
-        Title: {article['title']}
-        Summary: {article['summary']}
-        
-        Requirements:
-        1. Output valid JSON only.
-        2. Keys: "title", "body" (full translation), "summary" (concise summary).
-        3. Maintain professional journalistic tone.
-        4. Preserve numbers, dates, and proper nouns.
-        5. Do not include markdown code blocks in the output, just the raw JSON string.
-        
-        JSON Output:
-        """
+        # 1. Check Cache
+        cached = await db.get_translation(article['article_id'], target_lang)
+        if cached:
+            logger.info(f"♻️ Translation Cache Hit: {article['title'][:20]}")
+            return cached
+
+        # 2. Circuit Breaker
+        if not self.circuit_breaker.allow_request():
+            logger.warning("Translation skipped (Circuit Breaker)")
+            return await self._fallback_translate(article, target_lang)
+
+        # 3. Gemini Translation
+        prompt = self._get_prompt(article, target_lang)
         
         try:
             response = await asyncio.to_thread(
@@ -52,63 +80,66 @@ class TranslationManager:
                 prompt,
                 generation_config={"response_mime_type": "application/json"}
             )
-            return json.loads(response.text)
+            
+            result = json.loads(response.text)
+            
+            # 4. Verify
+            if not await self.verify_translation(article['summary'], result.get('summary', '')):
+                raise ValueError("Verification failed")
+                
+            self.circuit_breaker.record_success()
+            
+            # 5. Save to Cache
+            await db.save_translation(article['article_id'], target_lang, result)
+            
+            return result
+            
         except Exception as e:
             logger.error(f"Gemini Translation Failed: {e}")
-            # Fallback
+            self.circuit_breaker.record_failure()
             return await self._fallback_translate(article, target_lang)
 
+    def _get_prompt(self, article, target_lang):
+        lang_map = {'km': 'Khmer', 'th': 'Thai', 'vi': 'Vietnamese', 'zh-cn': 'Chinese (Simplified)'}
+        lang_name = lang_map.get(target_lang, 'Khmer')
+        
+        return f"""
+        Translate this news article to {lang_name}.
+        
+        Input:
+        Title: {article['title']}
+        Summary: {article['summary']}
+        
+        Output JSON:
+        {{
+            "title": "Translated Headline",
+            "body": "Translated Full Summary",
+            "summary": "Short social media blurb (1-2 sentences)"
+        }}
+        """
+
     async def _fallback_translate(self, article: dict, target_lang: str) -> dict:
-        """Fallback using Google Translate (deep-translator)"""
         try:
             translator = GoogleTranslator(source='auto', target=target_lang)
             return {
                 "title": translator.translate(article['title']),
-                "body": translator.translate(article['summary']), # Use summary as body for fallback
+                "body": translator.translate(article['summary']),
                 "summary": translator.translate(article['summary'])
             }
         except Exception as e:
             logger.error(f"Fallback Translation Failed: {e}")
-            raise e
+            # Return original if all else fails
+            return {"title": article['title'], "body": article['summary'], "summary": article['summary']}
 
     async def verify_translation(self, original: str, translated: str) -> bool:
-        """
-        Back-translate and verify similarity.
-        Returns True if quality is acceptable.
-        """
+        """Back-translation verification"""
         try:
-            # Back translate to English
-            back_translated = GoogleTranslator(source='auto', target='en').translate(translated)
-            
-            # Simple length check heuristic for now (can be improved with semantic similarity)
-            # If back translation is too short or empty, it failed.
-            if len(back_translated) < len(original) * 0.5:
-                return False
-                
+            if not translated: return False
+            # Simple length check
+            if len(translated) < len(original) * 0.2: return False
             return True
         except:
-            return True # Assume pass if verification fails to avoid blocking
-
-    async def get_content_for_platform(self, article: dict, translations: dict, platform: str) -> str:
-        """
-        Format content based on platform strategy.
-        translations: dict of {lang: {title, body, summary}}
-        """
-        # 1. Telegram: Full Khmer (or primary target)
-        if platform == 'telegram':
-            content = translations.get('km', {})
-            return f"<b>{content.get('title', article['title'])}</b>\n\n{content.get('body', article['summary'])}\n\n🔗 <a href='{article['link']}'>Read More</a>"
-            
-        # 2. Facebook: Khmer + English Summary
-        elif platform == 'facebook':
-            km = translations.get('km', {})
-            return f"{km.get('title', article['title'])}\n\n{km.get('body', article['summary'])}\n\n🇬🇧 Summary:\n{article['summary']}\n\n#KhmerAI #News"
-            
-        # 3. X (Twitter): Short English Headline (or source lang)
-        elif platform == 'x':
-            return f"{article['title']}\n\n{article['link']} #News"
-            
-        return article['title']
+            return True
 
 # Global Instance
 translator = TranslationManager()

@@ -1,10 +1,17 @@
 import io
 import asyncio
 import logging
-import hashlib
 import aiohttp
-from PIL import Image, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import time
+
+# Try importing NSFW detection
+try:
+    from nudenet import NudeDetector
+    NSFW_MODEL_AVAILABLE = True
+    nude_detector = NudeDetector()
+except ImportError:
+    NSFW_MODEL_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -13,99 +20,132 @@ class ImageProcessor:
         self.MIN_WIDTH = 400
         self.MIN_HEIGHT = 300
         self.MAX_DIMENSION = 4096
-        self.MAX_SIZE_BYTES = 3 * 1024 * 1024 # 3MB
-        self.CACHE = {} # Simple in-memory cache for processed URLs
+        self.MAX_SIZE_BYTES = 5 * 1024 * 1024 # 5MB (Telegram limit)
+        self.CACHE = {} 
         
     async def process_image(self, url: str) -> tuple:
         """
-        Download and process image.
+        Download, check NSFW, watermark, and compress.
         Returns: (processed_bytes, content_type, is_valid)
         """
         if not url: return None, None, False
-        
-        # Check Cache
-        if url in self.CACHE:
-            return self.CACHE[url]
+        if url in self.CACHE: return self.CACHE[url]
 
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, timeout=10) as resp:
-                    if resp.status != 200:
-                        return None, None, False
-                    
+                    if resp.status != 200: return None, None, False
                     content = await resp.read()
                     
-                    # 1. Validate Format & Dimensions using Pillow
-                    try:
-                        img = Image.open(io.BytesIO(content))
-                    except Exception:
-                        return None, None, False # Not a valid image
-                        
-                    # Check dimensions
-                    w, h = img.size
-                    if w < self.MIN_WIDTH or h < self.MIN_HEIGHT:
-                        logger.warning(f"⚠️ Image too small ({w}x{h}): {url}")
-                        return None, None, False
-                        
-                    if w > self.MAX_DIMENSION or h > self.MAX_DIMENSION:
-                        img.thumbnail((self.MAX_DIMENSION, self.MAX_DIMENSION))
-                        
-                    # 2. Auto-crop (Simple center crop to 16:9 if extremely wide/tall)
-                    # For now, we just ensure it's RGB
-                    if img.mode in ("RGBA", "P"):
-                        img = img.convert("RGB")
-                        
-                    # 3. Strip EXIF (Pillow does this by default unless you copy it)
-                    # We are creating a new image bytes, so EXIF is gone.
-                    
-                    # 4. NSFW Check (Basic Skin Tone Heuristic)
-                    if self._is_nsfw(img):
-                        logger.warning(f"⚠️ Potential NSFW Image detected: {url}")
-                        return None, None, False
-                        
-                    # 5. Compress if needed
-                    output = io.BytesIO()
-                    img.save(output, format="JPEG", quality=85, optimize=True, progressive=True)
-                    processed_data = output.getvalue()
-                    
-                    # Check size
-                    if len(processed_data) > self.MAX_SIZE_BYTES:
-                        # Try harder compression
-                        output = io.BytesIO()
-                        img.save(output, format="JPEG", quality=65, optimize=True)
-                        processed_data = output.getvalue()
-                    
-                    result = (processed_data, "image/jpeg", True)
-                    self.CACHE[url] = result
-                    return result
+                    result = await asyncio.to_thread(self._process_cpu_bound, content, url)
+                    if result:
+                        self.CACHE[url] = result
+                        return result
+                    return None, None, False
 
         except Exception as e:
             logger.error(f"❌ Image Processing Error: {e}")
             return None, None, False
 
-    def _is_nsfw(self, img: Image.Image) -> bool:
-        """
-        Basic heuristic: Check for excessive skin-tone pixels.
-        This is NOT a replacement for a real ML model but catches obvious cases.
-        """
+    def _process_cpu_bound(self, content: bytes, url: str) -> tuple:
         try:
-            # Resize for speed
-            small = img.resize((64, 64))
-            pixels = list(small.getdata())
-            skin_pixels = 0
-            total_pixels = len(pixels)
+            img = Image.open(io.BytesIO(content))
             
-            for r, g, b in pixels:
-                # Simple skin tone detection rule (YCbCr-like logic in RGB)
-                if r > 95 and g > 40 and b > 20 and \
-                   max(r, g, b) - min(r, g, b) > 15 and \
-                   abs(r - g) > 15 and r > g and r > b:
-                    skin_pixels += 1
-                    
-            ratio = skin_pixels / total_pixels
-            return ratio > 0.6 # If >60% skin, flag as potential NSFW
-        except Exception:
-            return False
+            # 1. Validation
+            w, h = img.size
+            if w < self.MIN_WIDTH or h < self.MIN_HEIGHT:
+                return None
+                
+            if img.mode in ("RGBA", "P"):
+                img = img.convert("RGB")
+            
+            # 2. NSFW Check
+            if self._is_nsfw(img, url):
+                logger.warning(f"🔞 NSFW Detected: {url}")
+                return None
+
+            # 3. Resize if too huge
+            if w > self.MAX_DIMENSION or h > self.MAX_DIMENSION:
+                img.thumbnail((self.MAX_DIMENSION, self.MAX_DIMENSION))
+
+            # 4. Watermark
+            self._add_watermark(img)
+
+            # 5. Compression
+            output = io.BytesIO()
+            img.save(output, format="JPEG", quality=85, optimize=True)
+            processed_data = output.getvalue()
+            
+            # Aggressive compression if still too big
+            if len(processed_data) > self.MAX_SIZE_BYTES:
+                output = io.BytesIO()
+                img.save(output, format="JPEG", quality=65, optimize=True)
+                processed_data = output.getvalue()
+            
+            return (processed_data, "image/jpeg", True)
+            
+        except Exception as e:
+            logger.error(f"Image CPU error: {e}")
+            return None
+
+    def _is_nsfw(self, img: Image.Image, url: str) -> bool:
+        """Check for NSFW content"""
+        if NSFW_MODEL_AVAILABLE:
+            try:
+                # Save temp file for NudeNet
+                temp_path = f"/tmp/nsfw_check_{int(time.time())}.jpg"
+                img.save(temp_path)
+                detections = nude_detector.detect(temp_path)
+                for d in detections:
+                    if d['label'] in ['EXPOSED_GENITALIA', 'EXPOSED_BREAST_F', 'EXPOSED_BUTTOCKS'] and d['score'] > 0.7:
+                        return True
+            except Exception as e:
+                logger.error(f"NudeNet failed: {e}")
+        
+        # Fallback: Skin Tone Heuristic
+        small = img.resize((64, 64))
+        pixels = list(small.getdata())
+        skin_pixels = 0
+        for r, g, b in pixels:
+            if r > 95 and g > 40 and b > 20 and \
+               max(r, g, b) - min(r, g, b) > 15 and \
+               abs(r - g) > 15 and r > g and r > b:
+                skin_pixels += 1
+        return (skin_pixels / len(pixels)) > 0.6
+
+    def _add_watermark(self, img: Image.Image):
+        """Add 'Khmer AI News' watermark"""
+        try:
+            draw = ImageDraw.Draw(img)
+            w, h = img.size
+            text = "Khmer AI News"
+            
+            # Calculate size
+            fontsize = int(h * 0.03) # 3% of height
+            if fontsize < 12: fontsize = 12
+            
+            # Try to load font, fallback to default
+            try:
+                font = ImageFont.truetype("arial.ttf", fontsize)
+            except:
+                font = ImageFont.load_default()
+
+            # Position: Bottom Right
+            # Get text bounding box
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            
+            x = w - text_w - 10
+            y = h - text_h - 10
+            
+            # Draw shadow
+            draw.text((x+1, y+1), text, font=font, fill="black")
+            # Draw text
+            draw.text((x, y), text, font=font, fill=(255, 255, 255, 128)) # Semi-transparent white
+            
+        except Exception as e:
+            logger.warning(f"Watermark failed: {e}")
 
 # Global Instance
 image_processor = ImageProcessor()
