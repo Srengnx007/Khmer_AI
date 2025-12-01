@@ -29,6 +29,16 @@ X_ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
 X_ACCESS_TOKEN_SECRET = os.getenv("X_ACCESS_TOKEN_SECRET")
 X_USERNAME = "@AIDailyNewskh"
 
+# Social Media Links Footer
+SOCIAL_MEDIA_FOOTER = """
+━━━━━━━━━━━━━━━━
+📢 Follow us on social media:
+✈️ Telegram: https://t.me/AIDailyNewsKH  
+📘 Facebook: https://www.facebook.com/profile.php?id=61584116626111  
+🐦 X (Twitter): https://x.com/@AIDailyNewskh  
+━━━━━━━━━━━━━━━━
+"""
+
 # 4. AI Settings
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = "gemini-2.0-flash"
@@ -147,6 +157,7 @@ NEWS_SLOTS = [
 
 def validate_config():
     """Validate critical configuration"""
+    errors = []
     required = [
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHANNEL_ID",
         "GEMINI_API_KEY"
@@ -156,11 +167,39 @@ def validate_config():
     if missing:
         raise ValueError(f"❌ Missing Critical Env Vars: {', '.join(missing)}")
     
-    # Optional warnings
-    if not (FB_PAGE_ID and FB_ACCESS_TOKEN):
+    # Facebook validation
+    if FB_PAGE_ID and FB_ACCESS_TOKEN:
+        if not FB_PAGE_ID.isdigit():
+            errors.append("FB_PAGE_ID must be numeric (e.g., '123456789012345')")
+        if len(FB_ACCESS_TOKEN) < 50:
+            errors.append("FB_ACCESS_TOKEN appears invalid (too short, should be 100+ chars)")
+    elif FB_PAGE_ID or FB_ACCESS_TOKEN:
+        # One is set but not the other
+        logging.warning("⚠️ Facebook partially configured. Both FB_PAGE_ID and FB_ACCESS_TOKEN are required.")
+    else:
+        # Neither is set
         logging.warning("⚠️ Facebook credentials missing. FB posting will be disabled.")
     
-    if not (X_API_KEY and X_API_SECRET):
+    # X (Twitter) validation
+    if X_API_KEY and X_API_SECRET and X_ACCESS_TOKEN and X_ACCESS_TOKEN_SECRET:
+        if len(X_API_KEY) < 20:
+            errors.append("X_API_KEY appears invalid (too short)")
+        if len(X_API_SECRET) < 40:
+            errors.append("X_API_SECRET appears invalid (too short)")
+        if len(X_ACCESS_TOKEN) < 40:
+            errors.append("X_ACCESS_TOKEN appears invalid (too short)")
+        if len(X_ACCESS_TOKEN_SECRET) < 40:
+            errors.append("X_ACCESS_TOKEN_SECRET appears invalid (too short)")
+    elif any([X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET]):
+        # Some are set but not all
+        logging.warning("⚠️ X (Twitter) partially configured. All 4 credentials are required.")
+    else:
+        # None are set
         logging.warning("⚠️ X (Twitter) credentials missing. X posting will be disabled.")
+    
+    # Raise errors if any validation failed
+    if errors:
+        raise ValueError(f"❌ Configuration Errors:\n  - " + "\n  - ".join(errors))
         
     return True
+

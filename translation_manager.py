@@ -81,10 +81,27 @@ class TranslationManager:
                 generation_config={"response_mime_type": "application/json"}
             )
             
-            result = json.loads(response.text)
+            # Parse JSON response
+            parsed = json.loads(response.text)
+            
+            # Handle both dict and list responses
+            if isinstance(parsed, list):
+                # If it's a list, take the first element
+                if len(parsed) > 0 and isinstance(parsed[0], dict):
+                    result = parsed[0]
+                else:
+                    raise ValueError(f"Invalid list response from Gemini: {parsed}")
+            elif isinstance(parsed, dict):
+                result = parsed
+            else:
+                raise ValueError(f"Unexpected response type from Gemini: {type(parsed)}")
+            
+            # Verify result has required fields
+            if not result.get('title') or not result.get('body'):
+                raise ValueError("Translation missing required fields (title, body)")
             
             # 4. Verify
-            if not await self.verify_translation(article['summary'], result.get('summary', '')):
+            if not await self.verify_translation(article['summary'], result.get('summary', result.get('body', ''))):
                 raise ValueError("Verification failed")
                 
             self.circuit_breaker.record_success()
