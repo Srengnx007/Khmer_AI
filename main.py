@@ -572,6 +572,9 @@ async def worker():
     # FIX #6: Removed config validation from here (moved to main block)
     await db.init_db()
     logger.info("🚀 MEGA NEWS BOT 2026 STARTED")
+    
+    # Initialize variables
+    boost_until = None
     consecutive_errors = 0
     
     # Initial Cleanup
